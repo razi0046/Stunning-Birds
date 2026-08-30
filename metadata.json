@@ -1,0 +1,6 @@
+{
+  "name": "Stunning Birds Leather Goods",
+  "description": "Luxury handcrafted leather goods e-commerce application with bespoke personalization, multi-image gallery, SKU tracking, automated courier shipping label generation, PDF export, and commerce manager admin panel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

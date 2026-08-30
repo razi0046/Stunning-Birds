@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-serif: 'Playfair Display', 'Cormorant Garamond', Georgia, serif;
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #fbf8f4;
+    color: #171513;
+  }
+
+  h1, h2, h3, .font-serif-luxury {
+    font-family: var(--font-serif);
+    letter-spacing: -0.01em;
+  }
+}
+
+.font-serif-luxury {
+  font-family: 'Playfair Display', 'Cormorant Garamond', Georgia, serif;
+}
+
+.font-brand {
+  font-family: 'Playfair Display', 'Cormorant Garamond', Georgia, serif;
+  letter-spacing: 0.18em;
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f4eee5;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4c8b8;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a99680;
+}
+
+/* Luxury Loader Animations */
+@keyframes atelierRingSpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes atelierRingReverse {
+  0% {
+    transform: rotate(360deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes atelierPulseGlow {
+  0%, 100% {
+    opacity: 0.82;
+    transform: scale(1);
+    filter: drop-shadow(0 0 12px rgba(212, 175, 55, 0.25));
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.035);
+    filter: drop-shadow(0 0 24px rgba(212, 175, 55, 0.45));
+  }
+}
+
+@keyframes atelierShimmerBeam {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-atelier-spin {
+  animation: atelierRingSpin 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.animate-atelier-reverse {
+  animation: atelierRingReverse 3.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.animate-atelier-glow {
+  animation: atelierPulseGlow 2.4s ease-in-out infinite;
+}
+
+.animate-atelier-shimmer {
+  animation: atelierShimmerBeam 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-atelier-spin,
+  .animate-atelier-reverse,
+  .animate-atelier-glow,
+  .animate-atelier-shimmer {
+    animation: none !important;
+    transform: none !important;
+  }
+}
+
+
