@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, Heart, User, ShoppingBag, Menu, X, Shield, Sparkles } from 'lucide-react';
+import { Search, Heart, User, ShoppingBag, Menu, X, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useShop, ScreenView } from '../context/ShopContext';
 
@@ -18,9 +18,6 @@ export const Navbar: React.FC = () => {
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // If we are in Admin screens, we might render the full layout or a dedicated header
-  const isAdminView = currentScreen === 'admin-overview' || currentScreen === 'admin-orders';
-
   const handleNavClick = (screen: ScreenView, category?: string) => {
     if (category) {
       setSelectedCategoryFilter(category);
@@ -35,14 +32,6 @@ export const Navbar: React.FC = () => {
       openAuthModal('login', undefined, 'Sign in to access your client portal & commissions');
     } else {
       handleNavClick('account');
-    }
-  };
-
-  const handleAdminNavClick = () => {
-    if (userProfile.isAdmin) {
-      handleNavClick('admin-overview');
-    } else {
-      handleNavClick('admin-login');
     }
   };
 
@@ -286,17 +275,6 @@ export const Navbar: React.FC = () => {
                       {userProfile.name.split(' ')[0]}
                     </span>
                   )}
-                </button>
-
-                <button
-                  onClick={() => {
-                    setMobileMenuOpen(false);
-                    handleAdminNavClick();
-                  }}
-                  className="text-left px-3.5 py-2.5 rounded-xs hover:bg-black/5 hover:text-[#8c562e] text-[#8c562e] transition-colors font-semibold flex items-center gap-2 cursor-pointer"
-                >
-                  <Shield className="w-4 h-4" />
-                  <span>Commerce Manager (Admin)</span>
                 </button>
               </div>
             </motion.div>

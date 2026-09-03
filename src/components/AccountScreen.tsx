@@ -25,32 +25,37 @@ import {
   Sparkle,
   Copy,
   Check,
-  X
+  X,
+  XCircle,
+  AlertTriangle,
+  AlertOctagon
 } from 'lucide-react';
 import { useShop } from '../context/ShopContext';
 import { formatINR } from '../utils/formatCurrency';
-import { Order } from '../types';
+import { Order, OrderItem, ReturnRequest, ReturnStatus } from '../types';
 import { 
   generateAndDownloadInvoicePDF, 
   verifyOrderOwnership, 
   ATELIER_STORE_CONFIG 
 } from '../utils/invoicePdfGenerator';
 import { InvoiceModal } from './InvoiceModal';
+import { ReturnRequestModal } from './ReturnRequestModal';
+import { CustomerReturnsList } from './CustomerReturnsList';
 import { supabase } from '../supabaseClient';
 
 export const getFulfillmentBadgeClass = (status?: string) => {
   const norm = (status || '').toUpperCase();
   switch (norm) {
+    case 'PROCESSING':
+      return 'bg-[#f3e8ff] text-[#6b21a8] border-[#e9d5ff]';
     case 'CRAFTING':
       return 'bg-[#fef3c7] text-[#92400e] border-[#fde68a]';
     case 'SHIPPED':
       return 'bg-[#e0f2fe] text-[#075985] border-[#bae6fd]';
-    case 'PROCESSING':
-    case 'CONFIRMED':
-    case 'PENDING':
-      return 'bg-[#f3e8ff] text-[#6b21a8] border-[#e9d5ff]';
     case 'DELIVERED':
       return 'bg-[#dcfce7] text-[#166534] border-[#bbf7d0]';
+    case 'CANCELLED':
+      return 'bg-[#fee2e2] text-[#991b1b] border-[#fecaca]';
     default:
       return 'bg-[#f6f2ea] text-[#78716c] border-[#ded5c7]';
   }
@@ -59,28 +64,50 @@ export const getFulfillmentBadgeClass = (status?: string) => {
 export const getFulfillmentDisplayLabel = (status?: string) => {
   const norm = (status || '').toUpperCase();
   switch (norm) {
+    case 'PROCESSING':
+      return 'Processing';
     case 'CRAFTING':
       return 'At the Atelier';
     case 'SHIPPED':
       return 'Dispatched';
-    case 'PROCESSING':
-    case 'CONFIRMED':
-    case 'PENDING':
-      return 'Processing';
     case 'DELIVERED':
       return 'Delivered';
+    case 'CANCELLED':
+      return 'Cancelled';
     default:
       return status || 'Processing';
   }
 };
 
+export const isOrderCancellable = (status?: string): boolean => {
+  const norm = (status || '').toUpperCase();
+  return norm === 'PROCESSING' || norm === 'CRAFTING';
+};
+
+export const isOrderReturnable = (order: Order): { eligible: boolean; daysLeft: number } => {
+  if (!order || (order.fulfillmentStatus || '').toUpperCase() !== 'DELIVERED') {
+    return { eligible: false, daysLeft: 0 };
+  }
+  let deliveryDateStr = order.date;
+  const deliveredStep = order.timeline?.find(s => s.key === 'delivered' || s.title?.toUpperCase().includes('DELIVERED'));
+  if (deliveredStep?.date) {
+    deliveryDateStr = deliveredStep.date;
+  }
+  const deliveryDate = new Date(deliveryDateStr);
+  const now = Date.now();
+  const deliveryTime = isNaN(deliveryDate.getTime()) ? now : deliveryDate.getTime();
+  const diffDays = (now - deliveryTime) / (24 * 60 * 60 * 1000);
+  const daysLeft = Math.max(0, Math.ceil(7 - diffDays));
+  return { eligible: diffDays <= 7, daysLeft };
+};
+
 export const getFulfillmentStepIndex = (status?: string): number => {
   const norm = (status || '').toUpperCase();
-  if (norm === 'PROCESSING' || norm === 'CONFIRMED' || norm === 'PENDING') return 0;
+  if (norm === 'PROCESSING') return 0;
   if (norm === 'CRAFTING') return 1;
   if (norm === 'SHIPPED') return 2;
   if (norm === 'DELIVERED') return 3;
-  return 1;
+  return 0;
 };
 
 export const AccountScreen: React.FC = () => {
@@ -93,19 +120,154 @@ export const AccountScreen: React.FC = () => {
     toggleWishlist,
     setCurrentScreen,
     refetchOrders,
+    cancelCustomerOrder,
     isLoggedIn,
     openAuthModal,
     logout,
     showToast,
   } = useShop();
 
-  const [activeTab, setActiveTab] = useState<'overview' | 'commissions' | 'care' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'commissions' | 'returns' | 'care' | 'settings'>('overview');
   const [downloadingOrderId, setDownloadingOrderId] = useState<string | null>(null);
   const [previewOrder, setPreviewOrder] = useState<Order | null>(null);
   const [isInvoiceModalOpen, setIsInvoiceModalOpen] = useState(false);
   const [trackingModalOrder, setTrackingModalOrder] = useState<Order | null>(null);
   const [isTrackingModalOpen, setIsTrackingModalOpen] = useState(false);
   const [hasCopiedAwb, setHasCopiedAwb] = useState(false);
+
+  // Cancellation Modal State
+  const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
+  const [orderToCancel, setOrderToCancel] = useState<Order | null>(null);
+  const [selectedCancelReason, setSelectedCancelReason] = useState('Changed mind regarding purchase');
+  const [customCancelReason, setCustomCancelReason] = useState('');
+  const [isSubmittingCancellation, setIsSubmittingCancellation] = useState(false);
+  const [cancelModalError, setCancelModalError] = useState<string | null>(null);
+
+  // Return & Refund Modal State
+  const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
+  const [returnModalOrder, setReturnModalOrder] = useState<Order | null>(null);
+  const [returnModalItem, setReturnModalItem] = useState<OrderItem | undefined>(undefined);
+  const [customerReturns, setCustomerReturns] = useState<ReturnRequest[]>([]);
+
+  const fetchCustomerReturns = React.useCallback(async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        setCustomerReturns([]);
+        return;
+      }
+
+      const res = await fetch('/api/returns', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!res.ok) return;
+
+      const data = await res.json();
+      if (data.success && Array.isArray(data.returns)) {
+        setCustomerReturns(data.returns);
+      }
+    } catch (err) {
+      console.error('Error fetching customer return requests:', err);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    fetchCustomerReturns();
+  }, [fetchCustomerReturns, userProfile.id, userProfile.email]);
+
+  const NON_REJECTED_RETURN_STATUSES: ReturnStatus[] = [
+    'RETURN_REQUESTED',
+    'RETURN_APPROVED',
+    'PICKUP_SCHEDULED',
+    'PICKED_UP',
+    'IN_TRANSIT',
+    'RETURN_RECEIVED',
+    'INSPECTION_COMPLETED',
+    'REFUND_INITIATED',
+    'REFUNDED',
+    'RETURN_COMPLETED',
+  ];
+
+  const getExistingReturnForProduct = (
+    order: Order,
+    item?: OrderItem | { productId?: string; productName?: string; id?: string; sku?: string; name?: string }
+  ): ReturnRequest | undefined => {
+    const cleanOrderId = (order.id || '').replace(/^#/, '').trim().toLowerCase();
+
+    return customerReturns.find(r => {
+      if (!NON_REJECTED_RETURN_STATUSES.includes(r.status)) return false;
+
+      const rOrderId = (r.orderId || '').replace(/^#/, '').trim().toLowerCase();
+      if (rOrderId !== cleanOrderId) return false;
+
+      // If no specific item passed (order-level check)
+      if (!item) {
+        return true;
+      }
+
+      const itemId = (item as any).id || (item as any).orderItemId;
+      const prodId = item.productId || (item as any).id;
+      const prodName = (item.productName || (item as any).name || '').trim().toLowerCase();
+      const prodSku = (item.sku || (item as any).productSku || '').trim().toLowerCase();
+
+      if (r.orderItemId && itemId && r.orderItemId === itemId) return true;
+      if (r.productId && prodId && (r.productId === prodId || r.productId === itemId)) return true;
+      if (r.productName && prodName && r.productName.trim().toLowerCase() === prodName) return true;
+      if (r.productSku && prodSku && r.productSku.trim().toLowerCase() === prodSku) return true;
+
+      // If order has only 1 item and return exists for this order
+      if ((!order.items || order.items.length <= 1) && rOrderId === cleanOrderId) return true;
+
+      return false;
+    });
+  };
+
+  const handleOpenReturnModal = (order: Order, item?: OrderItem, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setReturnModalOrder(order);
+    setReturnModalItem(item);
+    setIsReturnModalOpen(true);
+  };
+
+  const handleOpenCancelModal = (order: Order, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setOrderToCancel(order);
+    setSelectedCancelReason('Changed mind regarding purchase');
+    setCustomCancelReason('');
+    setCancelModalError(null);
+    setIsCancelModalOpen(true);
+  };
+
+  const handleConfirmCancellation = async () => {
+    if (!orderToCancel) return;
+    setIsSubmittingCancellation(true);
+    setCancelModalError(null);
+    
+    const finalReason = selectedCancelReason;
+    const customerNote = selectedCancelReason === 'Other' ? customCancelReason.trim() : (customCancelReason.trim() || undefined);
+
+    try {
+      const result = await cancelCustomerOrder(orderToCancel.id, finalReason, customerNote);
+      if (result.success) {
+        setIsCancelModalOpen(false);
+        setOrderToCancel(null);
+        // Synchronize tracking modal state if open
+        if (trackingModalOrder && (trackingModalOrder.id === orderToCancel.id || trackingModalOrder.id.replace(/^#/, '') === orderToCancel.id.replace(/^#/, ''))) {
+          setTrackingModalOrder(prev => prev ? { ...prev, fulfillmentStatus: 'CANCELLED' } : null);
+        }
+      } else {
+        setCancelModalError(result.message || 'Failed to cancel order.');
+      }
+    } catch (err: any) {
+      setCancelModalError(err?.message || 'An error occurred during cancellation.');
+    } finally {
+      setIsSubmittingCancellation(false);
+    }
+  };
 
   React.useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -234,6 +396,7 @@ export const AccountScreen: React.FC = () => {
             {[
               { id: 'overview', label: 'Overview' },
               { id: 'commissions', label: `Commissions (${userOrders.length})` },
+              { id: 'returns', label: 'Returns & Refunds' },
               { id: 'care', label: 'Patina Care' },
               { id: 'settings', label: 'Preferences' },
             ].map(tab => (
@@ -384,7 +547,13 @@ export const AccountScreen: React.FC = () => {
                         {latestOrder.fulfillmentStatus || 'CRAFTING'}
                       </span>
                       <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${
-                        latestOrder.paymentStatus === 'Paid' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-amber-50 text-amber-700 border border-amber-200'
+                        latestOrder.paymentStatus === 'Refunded'
+                          ? 'bg-purple-50 text-purple-700 border border-purple-200'
+                          : latestOrder.paymentStatus === 'Paid'
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          : latestOrder.paymentStatus === 'Failed'
+                          ? 'bg-red-50 text-red-700 border border-red-200'
+                          : 'bg-amber-50 text-amber-700 border border-amber-200'
                       }`}>
                         {latestOrder.paymentStatus || 'Paid'}
                       </span>
@@ -412,6 +581,12 @@ export const AccountScreen: React.FC = () => {
                           <span>• {latestOrder.items[0].foilColor || 'Gold'} Foil</span>
                         </div>
                       )}
+                      {getExistingReturnForProduct(latestOrder, latestOrder.items?.[0]) && (
+                        <p className="text-xs font-medium text-[#8c562e] flex items-center gap-1.5 mt-2 bg-[#fcfaf7] px-2.5 py-1 border border-[#d4af37]/40 rounded-xs w-fit">
+                          <RotateCcw className="w-3.5 h-3.5 text-[#8c562e] shrink-0" />
+                          <span>Return requested for this product.</span>
+                        </p>
+                      )}
                       {(latestOrder.items?.length || 0) > 1 && (
                         <p className="text-[11px] text-[#8c827a] mt-1">
                           + {(latestOrder.items?.length || 0) - 1} additional bespoke {(latestOrder.items?.length || 0) - 1 === 1 ? 'item' : 'items'}
@@ -426,128 +601,144 @@ export const AccountScreen: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Multi-Step Timeline (Vertical on Mobile, Horizontal on sm+) */}
-                  <div className="py-6 border-y border-[#f0eae0]">
-                    <div className="relative flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-6 sm:space-y-0">
-                      
-                      {/* Horizontal connecting background bar (Desktop) */}
-                      <div className="hidden sm:block absolute top-1/2 left-4 right-4 -translate-y-1/2 h-[2px] bg-[#e4dcd0] z-0" />
-                      <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: progressWidth }}
-                        transition={{ duration: 0.8, ease: 'easeOut' }}
-                        className={`hidden sm:block absolute top-1/2 left-4 -translate-y-1/2 h-[2px] z-0 ${
-                          stepIdx === 3 ? 'bg-emerald-600' : 'bg-[#8c562e]'
-                        }`}
-                      />
-
-                      {/* Vertical connecting background bar (Mobile only) */}
-                      <div className="sm:hidden absolute top-4 bottom-4 left-[15px] w-[2px] bg-[#e4dcd0] z-0" />
-                      <motion.div
-                        initial={{ height: 0 }}
-                        animate={{ height: progressHeight }}
-                        transition={{ duration: 0.8, ease: 'easeOut' }}
-                        className={`sm:hidden absolute top-4 left-[15px] w-[2px] z-0 ${
-                          stepIdx === 3 ? 'bg-emerald-600' : 'bg-[#8c562e]'
-                        }`}
-                      />
-
-                      {/* Step 1: Placed */}
-                      <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3.5 sm:gap-0 sm:space-y-2">
-                        <div className="w-8 h-8 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
-                          <CheckCircle2 className="w-4 h-4" />
+                  {/* Multi-Step Timeline or Cancelled State */}
+                  {latestOrder.fulfillmentStatus === 'CANCELLED' ? (
+                    <div className="py-5 border-y border-[#f0eae0]">
+                      <div className="flex items-start sm:items-center gap-3.5 p-4 bg-red-50/80 border border-red-200 rounded-xs">
+                        <div className="w-8 h-8 rounded-full bg-[#991b1b] text-white flex items-center justify-center shadow-xs shrink-0 mt-0.5 sm:mt-0">
+                          <XCircle className="w-4 h-4" />
                         </div>
-                        <div className="flex-1 min-w-0 text-left sm:text-center">
-                          <h5 className="text-xs sm:text-[11px] font-bold uppercase tracking-wider text-[#181614]">Order Placed</h5>
-                          <span className="text-[11px] sm:text-[10px] text-[#8c857d] block">{latestOrder.date || 'Received'}</span>
+                        <div className="flex-1">
+                          <h5 className="text-xs font-bold uppercase tracking-wider text-[#991b1b]">Commission Cancelled</h5>
+                          <p className="text-xs text-[#7f1d1d] mt-0.5 leading-relaxed">
+                            This commission was cancelled upon patron request. Workbench craftsmanship has been halted, and full invoice/record details remain preserved in your archive.
+                          </p>
                         </div>
                       </div>
-
-                      {/* Step 2: At Atelier */}
-                      <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3.5 sm:gap-0 sm:space-y-2">
-                        {stepIdx > 1 ? (
-                          <div className="w-8 h-8 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
-                            <CheckCircle2 className="w-4 h-4" />
-                          </div>
-                        ) : stepIdx === 1 ? (
-                          <div className="w-8 h-8 rounded-full bg-[#d4af37] text-black ring-4 ring-[#d4af37]/30 flex items-center justify-center shadow-xs animate-pulse shrink-0">
-                            <Clock className="w-4 h-4" />
-                          </div>
-                        ) : (
-                          <div className="w-8 h-8 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
-                            <Clock className="w-4 h-4" />
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0 text-left sm:text-center">
-                          <h5 className={`text-xs sm:text-[11px] font-bold uppercase tracking-wider ${
-                            stepIdx === 1 ? 'text-[#8c562e]' : (stepIdx > 1 ? 'text-[#181614]' : 'text-[#8c857d]')
-                          }`}>
-                            At The Atelier
-                          </h5>
-                          <span className={`text-[11px] sm:text-[10px] block ${
-                            stepIdx === 1 ? 'text-[#8c562e] font-medium' : 'text-[#8c857d]'
-                          }`}>
-                            {stepIdx > 1 ? 'Crafting Completed' : (stepIdx === 1 ? 'Stitching in Progress' : 'Queued for Crafting')}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Step 3: Dispatched */}
-                      <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3.5 sm:gap-0 sm:space-y-2">
-                        {stepIdx > 2 ? (
-                          <div className="w-8 h-8 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
-                            <CheckCircle2 className="w-4 h-4" />
-                          </div>
-                        ) : stepIdx === 2 ? (
-                          <div className="w-8 h-8 rounded-full bg-[#0284c7] text-white ring-4 ring-[#0284c7]/30 flex items-center justify-center shadow-xs animate-pulse shrink-0">
-                            <Truck className="w-4 h-4" />
-                          </div>
-                        ) : (
-                          <div className="w-8 h-8 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
-                            <Truck className="w-4 h-4" />
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0 text-left sm:text-center">
-                          <h5 className={`text-xs sm:text-[11px] font-bold uppercase tracking-wider ${
-                            stepIdx === 2 ? 'text-[#0284c7]' : (stepIdx > 2 ? 'text-[#181614]' : 'text-[#8c857d]')
-                          }`}>
-                            Dispatched
-                          </h5>
-                          <span className={`text-[11px] sm:text-[10px] block ${
-                            stepIdx === 2 ? 'text-[#0284c7] font-medium' : 'text-[#8c857d]'
-                          }`}>
-                            {stepIdx > 2 ? 'Express Courier' : (stepIdx === 2 ? 'In Transit' : 'Pending Dispatch')}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Step 4: Delivered */}
-                      <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3.5 sm:gap-0 sm:space-y-2">
-                        {stepIdx === 3 ? (
-                          <div className="w-8 h-8 rounded-full bg-[#16a34a] text-white ring-4 ring-[#16a34a]/30 flex items-center justify-center shadow-xs shrink-0">
-                            <CheckCircle2 className="w-4 h-4" />
-                          </div>
-                        ) : (
-                          <div className="w-8 h-8 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
-                            <Package className="w-4 h-4" />
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0 text-left sm:text-center">
-                          <h5 className={`text-xs sm:text-[11px] font-bold uppercase tracking-wider ${
-                            stepIdx === 3 ? 'text-[#166534]' : 'text-[#8c857d]'
-                          }`}>
-                            Delivered
-                          </h5>
-                          <span className={`text-[11px] sm:text-[10px] block ${
-                            stepIdx === 3 ? 'text-[#166534] font-medium' : 'text-[#8c857d]'
-                          }`}>
-                            {stepIdx === 3 ? 'Safely Delivered' : 'Estimated 3-5 Days'}
-                          </span>
-                        </div>
-                      </div>
-
                     </div>
-                  </div>
+                  ) : (
+                    <div className="py-6 border-y border-[#f0eae0]">
+                      <div className="relative flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-6 sm:space-y-0">
+                        
+                        {/* Horizontal connecting background bar (Desktop) */}
+                        <div className="hidden sm:block absolute top-1/2 left-4 right-4 -translate-y-1/2 h-[2px] bg-[#e4dcd0] z-0" />
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: progressWidth }}
+                          transition={{ duration: 0.8, ease: 'easeOut' }}
+                          className={`hidden sm:block absolute top-1/2 left-4 -translate-y-1/2 h-[2px] z-0 ${
+                            stepIdx === 3 ? 'bg-emerald-600' : 'bg-[#8c562e]'
+                          }`}
+                        />
+
+                        {/* Vertical connecting background bar (Mobile only) */}
+                        <div className="sm:hidden absolute top-4 bottom-4 left-[15px] w-[2px] bg-[#e4dcd0] z-0" />
+                        <motion.div
+                          initial={{ height: 0 }}
+                          animate={{ height: progressHeight }}
+                          transition={{ duration: 0.8, ease: 'easeOut' }}
+                          className={`sm:hidden absolute top-4 left-[15px] w-[2px] z-0 ${
+                            stepIdx === 3 ? 'bg-emerald-600' : 'bg-[#8c562e]'
+                          }`}
+                        />
+
+                        {/* Step 1: Placed */}
+                        <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3.5 sm:gap-0 sm:space-y-2">
+                          <div className="w-8 h-8 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
+                            <CheckCircle2 className="w-4 h-4" />
+                          </div>
+                          <div className="flex-1 min-w-0 text-left sm:text-center">
+                            <h5 className="text-xs sm:text-[11px] font-bold uppercase tracking-wider text-[#181614]">Order Placed</h5>
+                            <span className="text-[11px] sm:text-[10px] text-[#8c857d] block">{latestOrder.date || 'Received'}</span>
+                          </div>
+                        </div>
+
+                        {/* Step 2: At Atelier */}
+                        <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3.5 sm:gap-0 sm:space-y-2">
+                          {stepIdx > 1 ? (
+                            <div className="w-8 h-8 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
+                              <CheckCircle2 className="w-4 h-4" />
+                            </div>
+                          ) : stepIdx === 1 ? (
+                            <div className="w-8 h-8 rounded-full bg-[#d4af37] text-black ring-4 ring-[#d4af37]/30 flex items-center justify-center shadow-xs animate-pulse shrink-0">
+                              <Clock className="w-4 h-4" />
+                            </div>
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
+                              <Clock className="w-4 h-4" />
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0 text-left sm:text-center">
+                            <h5 className={`text-xs sm:text-[11px] font-bold uppercase tracking-wider ${
+                              stepIdx === 1 ? 'text-[#8c562e]' : (stepIdx > 1 ? 'text-[#181614]' : 'text-[#8c857d]')
+                            }`}>
+                              At The Atelier
+                            </h5>
+                            <span className={`text-[11px] sm:text-[10px] block ${
+                              stepIdx === 1 ? 'text-[#8c562e] font-medium' : 'text-[#8c857d]'
+                            }`}>
+                              {stepIdx > 1 ? 'Crafting Completed' : (stepIdx === 1 ? 'Stitching in Progress' : 'Queued for Crafting')}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Step 3: Dispatched */}
+                        <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3.5 sm:gap-0 sm:space-y-2">
+                          {stepIdx > 2 ? (
+                            <div className="w-8 h-8 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
+                              <CheckCircle2 className="w-4 h-4" />
+                            </div>
+                          ) : stepIdx === 2 ? (
+                            <div className="w-8 h-8 rounded-full bg-[#0284c7] text-white ring-4 ring-[#0284c7]/30 flex items-center justify-center shadow-xs animate-pulse shrink-0">
+                              <Truck className="w-4 h-4" />
+                            </div>
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
+                              <Truck className="w-4 h-4" />
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0 text-left sm:text-center">
+                            <h5 className={`text-xs sm:text-[11px] font-bold uppercase tracking-wider ${
+                              stepIdx === 2 ? 'text-[#0284c7]' : (stepIdx > 2 ? 'text-[#181614]' : 'text-[#8c857d]')
+                            }`}>
+                              Dispatched
+                            </h5>
+                            <span className={`text-[11px] sm:text-[10px] block ${
+                              stepIdx === 2 ? 'text-[#0284c7] font-medium' : 'text-[#8c857d]'
+                            }`}>
+                              {stepIdx > 2 ? 'Express Courier' : (stepIdx === 2 ? 'In Transit' : 'Pending Dispatch')}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Step 4: Delivered */}
+                        <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3.5 sm:gap-0 sm:space-y-2">
+                          {stepIdx === 3 ? (
+                            <div className="w-8 h-8 rounded-full bg-[#16a34a] text-white ring-4 ring-[#16a34a]/30 flex items-center justify-center shadow-xs shrink-0">
+                              <CheckCircle2 className="w-4 h-4" />
+                            </div>
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
+                              <Package className="w-4 h-4" />
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0 text-left sm:text-center">
+                            <h5 className={`text-xs sm:text-[11px] font-bold uppercase tracking-wider ${
+                              stepIdx === 3 ? 'text-[#166534]' : 'text-[#8c857d]'
+                            }`}>
+                              Delivered
+                            </h5>
+                            <span className={`text-[11px] sm:text-[10px] block ${
+                              stepIdx === 3 ? 'text-[#166534] font-medium' : 'text-[#8c857d]'
+                            }`}>
+                              {stepIdx === 3 ? 'Safely Delivered' : 'Estimated 3-5 Days'}
+                            </span>
+                          </div>
+                        </div>
+
+                      </div>
+                    </div>
+                  )}
 
                   {/* Invoice & Tracking Actions Strip */}
                   <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pt-2">
@@ -559,8 +750,41 @@ export const AccountScreen: React.FC = () => {
                       <span>Live Consignment & Courier Details</span>
                     </button>
 
-                    {/* Action Buttons: [ Download Invoice ] [ Preview ] */}
+                    {/* Action Buttons: [ Cancel Order ] [ Request Return ] [ Download Invoice ] [ Preview ] */}
                     <div className="flex flex-wrap items-center gap-2.5">
+                      {isOrderCancellable(latestOrder.fulfillmentStatus) && (
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={(e) => handleOpenCancelModal(latestOrder, e)}
+                          className="px-3.5 py-2 bg-white hover:bg-red-50 text-[#991b1b] border border-[#fecaca] hover:border-red-300 text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
+                          title="Request Order Cancellation"
+                        >
+                          <XCircle className="w-3.5 h-3.5 text-[#991b1b]" />
+                          <span>Cancel Order</span>
+                        </motion.button>
+                      )}
+
+                      {isOrderReturnable(latestOrder).eligible && (
+                        getExistingReturnForProduct(latestOrder, latestOrder.items?.[0]) ? (
+                          <p className="text-xs font-medium text-[#8c562e] flex items-center gap-1.5 px-3 py-2 bg-[#fcfaf7] border border-[#d4af37]/70 rounded-xs shadow-2xs">
+                            <RotateCcw className="w-3.5 h-3.5 text-[#8c562e] shrink-0" />
+                            <span>Return requested for this product.</span>
+                          </p>
+                        ) : (
+                          <motion.button
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={(e) => handleOpenReturnModal(latestOrder, undefined, e)}
+                            className="px-3.5 py-2 bg-[#fcfaf7] hover:bg-[#f6f0e4] text-[#8c562e] border border-[#d4af37]/70 hover:border-[#8c562e] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
+                            title="Request Return & Refund (Within 7 Days of Delivery)"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5 text-[#8c562e]" />
+                            <span>Request Return</span>
+                          </motion.button>
+                        )
+                      )}
+
                       <motion.button
                         id={`download-invoice-btn-${latestOrder.id.replace(/[^a-zA-Z0-9-]/g, '')}`}
                         whileHover={{ scale: 1.02 }}
@@ -728,7 +952,13 @@ export const AccountScreen: React.FC = () => {
                               {order.fulfillmentStatus || 'PROCESSING'}
                             </span>
                             <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                              order.paymentStatus === 'Paid' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-amber-50 text-amber-700 border border-amber-200'
+                              order.paymentStatus === 'Refunded'
+                                ? 'bg-purple-50 text-purple-700 border border-purple-200'
+                                : order.paymentStatus === 'Paid'
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                : order.paymentStatus === 'Failed'
+                                ? 'bg-red-50 text-red-700 border border-red-200'
+                                : 'bg-amber-50 text-amber-700 border border-amber-200'
                             }`}>
                               {order.paymentStatus || 'Paid'}
                             </span>
@@ -771,6 +1001,12 @@ export const AccountScreen: React.FC = () => {
                                         Monogram: [{item.monogram}] • {item.foilColor || 'Gold'} Foil
                                       </div>
                                     )}
+                                    {getExistingReturnForProduct(order, item) && (
+                                      <p className="text-xs font-medium text-[#8c562e] flex items-center gap-1.5 mt-2 bg-[#fcfaf7] px-2.5 py-1 border border-[#d4af37]/40 rounded-xs w-fit">
+                                        <RotateCcw className="w-3.5 h-3.5 text-[#8c562e] shrink-0" />
+                                        <span>Return requested for this product.</span>
+                                      </p>
+                                    )}
                                   </div>
                                 </div>
 
@@ -796,8 +1032,41 @@ export const AccountScreen: React.FC = () => {
                             </span>
                           </div>
 
-                          {/* EXACT LAYOUT: [ Track Consignment ] [ Download Invoice ] */}
+                          {/* EXACT LAYOUT: [ Cancel Order (if eligible) ] [ Track Consignment ] [ Download Invoice ] [ Preview ] */}
                           <div className="flex flex-wrap items-center gap-2.5">
+                            {isOrderCancellable(order.fulfillmentStatus) && (
+                              <motion.button
+                                whileHover={{ scale: 1.02 }}
+                                whileTap={{ scale: 0.98 }}
+                                onClick={(e) => handleOpenCancelModal(order, e)}
+                                className="px-3.5 py-2 bg-white hover:bg-red-50 text-[#991b1b] border border-[#fecaca] hover:border-red-300 text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
+                                title="Cancel this order"
+                              >
+                                <XCircle className="w-3.5 h-3.5 text-[#991b1b]" />
+                                <span>Cancel Order</span>
+                              </motion.button>
+                            )}
+
+                            {isOrderReturnable(order).eligible && (
+                              getExistingReturnForProduct(order) ? (
+                                <p className="text-xs font-medium text-[#8c562e] flex items-center gap-1.5 px-3 py-2 bg-[#fcfaf7] border border-[#d4af37]/70 rounded-xs shadow-2xs">
+                                  <RotateCcw className="w-3.5 h-3.5 text-[#8c562e] shrink-0" />
+                                  <span>Return requested for this product.</span>
+                                </p>
+                              ) : (
+                                <motion.button
+                                  whileHover={{ scale: 1.02 }}
+                                  whileTap={{ scale: 0.98 }}
+                                  onClick={(e) => handleOpenReturnModal(order, undefined, e)}
+                                  className="px-3.5 py-2 bg-[#fcfaf7] hover:bg-[#f6f0e4] text-[#8c562e] border border-[#d4af37]/70 hover:border-[#8c562e] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
+                                  title="Request Return & Refund (Within 7 Days of Delivery)"
+                                >
+                                  <RotateCcw className="w-3.5 h-3.5 text-[#8c562e]" />
+                                  <span>Request Return</span>
+                                </motion.button>
+                              )
+                            )}
+
                             <motion.button
                               whileHover={{ scale: 1.02 }}
                               whileTap={{ scale: 0.98 }}
@@ -836,6 +1105,13 @@ export const AccountScreen: React.FC = () => {
                   })}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* TAB: RETURNS & REFUNDS */}
+          {activeTab === 'returns' && (
+            <div className="bg-white border border-[#e4d9cb] rounded-xs p-6 sm:p-8 space-y-6 shadow-xs">
+              <CustomerReturnsList onNavigateToOrders={() => setActiveTab('commissions')} />
             </div>
           )}
 
@@ -984,122 +1260,136 @@ export const AccountScreen: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* 4-Step Visual Timeline (Vertical on Mobile, Horizontal on sm+) */}
-                  <div className="py-4 border-y border-[#f0eae0]">
-                    <span className="text-[10px] uppercase tracking-widest text-[#8c562e] font-bold block mb-4 sm:mb-6">Fulfillment Milestone</span>
-                    <div className="relative flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-5 sm:space-y-0">
-                      
-                      {/* Horizontal connecting background bar (Desktop) */}
-                      <div className="hidden sm:block absolute top-1/2 left-4 right-4 -translate-y-1/2 h-[2px] bg-[#e4dcd0] z-0" />
-                      <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: progressWidth }}
-                        transition={{ duration: 0.6 }}
-                        className={`hidden sm:block absolute top-1/2 left-4 -translate-y-1/2 h-[2px] z-0 ${
-                          stepIdx === 3 ? 'bg-emerald-600' : 'bg-[#8c562e]'
-                        }`}
-                      />
-
-                      {/* Vertical connecting background bar (Mobile only) */}
-                      <div className="sm:hidden absolute top-3.5 bottom-3.5 left-[13px] w-[2px] bg-[#e4dcd0] z-0" />
-                      <motion.div
-                        initial={{ height: 0 }}
-                        animate={{ height: progressHeight }}
-                        transition={{ duration: 0.6 }}
-                        className={`sm:hidden absolute top-3.5 left-[13px] w-[2px] z-0 ${
-                          stepIdx === 3 ? 'bg-emerald-600' : 'bg-[#8c562e]'
-                        }`}
-                      />
-
-                      {/* 1. Placed */}
-                      <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3 sm:gap-0 sm:space-y-1.5">
-                        <div className="w-7 h-7 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
+                  {/* 4-Step Visual Timeline or Cancelled Status */}
+                  {trackingModalOrder.fulfillmentStatus === 'CANCELLED' ? (
+                    <div className="py-4 border-y border-[#f0eae0]">
+                      <div className="flex items-center gap-3 p-3.5 bg-red-50 border border-red-200 rounded-xs">
+                        <div className="w-7 h-7 rounded-full bg-[#991b1b] text-white flex items-center justify-center shrink-0">
+                          <XCircle className="w-4 h-4" />
                         </div>
-                        <div className="flex-1 min-w-0 text-left sm:text-center">
-                          <span className="text-[11px] sm:text-[10px] font-bold uppercase tracking-wider text-[#181614] block">Placed</span>
-                          <span className="text-[10px] sm:text-[9px] text-[#8c857d] block">{trackingModalOrder.date || 'Received'}</span>
-                        </div>
-                      </div>
-
-                      {/* 2. Atelier */}
-                      <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3 sm:gap-0 sm:space-y-1.5">
-                        {stepIdx > 1 ? (
-                          <div className="w-7 h-7 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                          </div>
-                        ) : stepIdx === 1 ? (
-                          <div className="w-7 h-7 rounded-full bg-[#d4af37] text-black ring-4 ring-[#d4af37]/30 flex items-center justify-center shadow-xs animate-pulse shrink-0">
-                            <Clock className="w-3.5 h-3.5" />
-                          </div>
-                        ) : (
-                          <div className="w-7 h-7 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
-                            <Clock className="w-3.5 h-3.5" />
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0 text-left sm:text-center">
-                          <span className={`text-[11px] sm:text-[10px] font-bold uppercase tracking-wider block ${
-                            stepIdx === 1 ? 'text-[#8c562e]' : (stepIdx > 1 ? 'text-[#181614]' : 'text-[#8c857d]')
-                          }`}>
-                            Atelier
-                          </span>
-                          <span className="text-[10px] sm:text-[9px] text-[#8c857d] block">
-                            {stepIdx > 1 ? 'Crafted' : (stepIdx === 1 ? 'In Progress' : 'Queued')}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* 3. Dispatched */}
-                      <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3 sm:gap-0 sm:space-y-1.5">
-                        {stepIdx > 2 ? (
-                          <div className="w-7 h-7 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                          </div>
-                        ) : stepIdx === 2 ? (
-                          <div className="w-7 h-7 rounded-full bg-[#0284c7] text-white ring-4 ring-[#0284c7]/30 flex items-center justify-center shadow-xs animate-pulse shrink-0">
-                            <Truck className="w-3.5 h-3.5" />
-                          </div>
-                        ) : (
-                          <div className="w-7 h-7 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
-                            <Truck className="w-3.5 h-3.5" />
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0 text-left sm:text-center">
-                          <span className={`text-[11px] sm:text-[10px] font-bold uppercase tracking-wider block ${
-                            stepIdx === 2 ? 'text-[#0284c7]' : (stepIdx > 2 ? 'text-[#181614]' : 'text-[#8c857d]')
-                          }`}>
-                            Dispatched
-                          </span>
-                          <span className="text-[10px] sm:text-[9px] text-[#8c857d] block">
-                            {stepIdx > 2 ? 'Shipped' : (stepIdx === 2 ? 'In Transit' : 'Pending')}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* 4. Delivered */}
-                      <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3 sm:gap-0 sm:space-y-1.5">
-                        {stepIdx === 3 ? (
-                          <div className="w-7 h-7 rounded-full bg-[#16a34a] text-white ring-4 ring-[#16a34a]/30 flex items-center justify-center shadow-xs shrink-0">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                          </div>
-                        ) : (
-                          <div className="w-7 h-7 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
-                            <Package className="w-3.5 h-3.5" />
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0 text-left sm:text-center">
-                          <span className={`text-[11px] sm:text-[10px] font-bold uppercase tracking-wider block ${
-                            stepIdx === 3 ? 'text-[#166534]' : 'text-[#8c857d]'
-                          }`}>
-                            Delivered
-                          </span>
-                          <span className="text-[10px] sm:text-[9px] text-[#8c857d] block">
-                            {stepIdx === 3 ? 'Completed' : 'Pending'}
-                          </span>
+                        <div>
+                          <span className="text-xs font-bold uppercase tracking-wider text-[#991b1b] block">Commission Cancelled</span>
+                          <span className="text-[11px] text-[#7f1d1d] block mt-0.5">Craftsmanship and courier dispatch halted upon patron request.</span>
                         </div>
                       </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="py-4 border-y border-[#f0eae0]">
+                      <span className="text-[10px] uppercase tracking-widest text-[#8c562e] font-bold block mb-4 sm:mb-6">Fulfillment Milestone</span>
+                      <div className="relative flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-5 sm:space-y-0">
+                        
+                        {/* Horizontal connecting background bar (Desktop) */}
+                        <div className="hidden sm:block absolute top-1/2 left-4 right-4 -translate-y-1/2 h-[2px] bg-[#e4dcd0] z-0" />
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: progressWidth }}
+                          transition={{ duration: 0.6 }}
+                          className={`hidden sm:block absolute top-1/2 left-4 -translate-y-1/2 h-[2px] z-0 ${
+                            stepIdx === 3 ? 'bg-emerald-600' : 'bg-[#8c562e]'
+                          }`}
+                        />
+
+                        {/* Vertical connecting background bar (Mobile only) */}
+                        <div className="sm:hidden absolute top-3.5 bottom-3.5 left-[13px] w-[2px] bg-[#e4dcd0] z-0" />
+                        <motion.div
+                          initial={{ height: 0 }}
+                          animate={{ height: progressHeight }}
+                          transition={{ duration: 0.6 }}
+                          className={`sm:hidden absolute top-3.5 left-[13px] w-[2px] z-0 ${
+                            stepIdx === 3 ? 'bg-emerald-600' : 'bg-[#8c562e]'
+                          }`}
+                        />
+
+                        {/* 1. Placed */}
+                        <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3 sm:gap-0 sm:space-y-1.5">
+                          <div className="w-7 h-7 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="flex-1 min-w-0 text-left sm:text-center">
+                            <span className="text-[11px] sm:text-[10px] font-bold uppercase tracking-wider text-[#181614] block">Placed</span>
+                            <span className="text-[10px] sm:text-[9px] text-[#8c857d] block">{trackingModalOrder.date || 'Received'}</span>
+                          </div>
+                        </div>
+
+                        {/* 2. Atelier */}
+                        <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3 sm:gap-0 sm:space-y-1.5">
+                          {stepIdx > 1 ? (
+                            <div className="w-7 h-7 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            </div>
+                          ) : stepIdx === 1 ? (
+                            <div className="w-7 h-7 rounded-full bg-[#d4af37] text-black ring-4 ring-[#d4af37]/30 flex items-center justify-center shadow-xs animate-pulse shrink-0">
+                              <Clock className="w-3.5 h-3.5" />
+                            </div>
+                          ) : (
+                            <div className="w-7 h-7 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
+                              <Clock className="w-3.5 h-3.5" />
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0 text-left sm:text-center">
+                            <span className={`text-[11px] sm:text-[10px] font-bold uppercase tracking-wider block ${
+                              stepIdx === 1 ? 'text-[#8c562e]' : (stepIdx > 1 ? 'text-[#181614]' : 'text-[#8c857d]')
+                            }`}>
+                              Atelier
+                            </span>
+                            <span className="text-[10px] sm:text-[9px] text-[#8c857d] block">
+                              {stepIdx > 1 ? 'Crafted' : (stepIdx === 1 ? 'In Progress' : 'Queued')}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* 3. Dispatched */}
+                        <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3 sm:gap-0 sm:space-y-1.5">
+                          {stepIdx > 2 ? (
+                            <div className="w-7 h-7 rounded-full bg-[#8c562e] text-white flex items-center justify-center shadow-xs shrink-0">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            </div>
+                          ) : stepIdx === 2 ? (
+                            <div className="w-7 h-7 rounded-full bg-[#0284c7] text-white ring-4 ring-[#0284c7]/30 flex items-center justify-center shadow-xs animate-pulse shrink-0">
+                              <Truck className="w-3.5 h-3.5" />
+                            </div>
+                          ) : (
+                            <div className="w-7 h-7 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
+                              <Truck className="w-3.5 h-3.5" />
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0 text-left sm:text-center">
+                            <span className={`text-[11px] sm:text-[10px] font-bold uppercase tracking-wider block ${
+                              stepIdx === 2 ? 'text-[#0284c7]' : (stepIdx > 2 ? 'text-[#181614]' : 'text-[#8c857d]')
+                            }`}>
+                              Dispatched
+                            </span>
+                            <span className="text-[10px] sm:text-[9px] text-[#8c857d] block">
+                              {stepIdx > 2 ? 'Shipped' : (stepIdx === 2 ? 'In Transit' : 'Pending')}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* 4. Delivered */}
+                        <div className="relative z-10 flex flex-row sm:flex-col items-center sm:text-center gap-3 sm:gap-0 sm:space-y-1.5">
+                          {stepIdx === 3 ? (
+                            <div className="w-7 h-7 rounded-full bg-[#16a34a] text-white ring-4 ring-[#16a34a]/30 flex items-center justify-center shadow-xs shrink-0">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            </div>
+                          ) : (
+                            <div className="w-7 h-7 rounded-full bg-white border-2 border-[#cfc5b6] text-[#8c857d] flex items-center justify-center shrink-0">
+                              <Package className="w-3.5 h-3.5" />
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0 text-left sm:text-center">
+                            <span className={`text-[11px] sm:text-[10px] font-bold uppercase tracking-wider block ${
+                              stepIdx === 3 ? 'text-[#166534]' : 'text-[#8c857d]'
+                            }`}>
+                              Delivered
+                            </span>
+                            <span className="text-[10px] sm:text-[9px] text-[#8c857d] block">
+                              {stepIdx === 3 ? 'Completed' : 'Pending'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Delivery Address & Information */}
                   <div className="p-3.5 bg-[#fbf9f5] border border-[#ded5c7] rounded-xs text-xs space-y-1">
@@ -1114,15 +1404,32 @@ export const AccountScreen: React.FC = () => {
                 </div>
 
                 {/* Modal Footer */}
-                <div className="bg-[#f6f2ea] px-6 py-4 border-t border-[#ded5c7] flex justify-between items-center">
-                  <button
-                    onClick={(e) => handleDownloadInvoice(trackingModalOrder, e)}
-                    disabled={downloadingOrderId === trackingModalOrder.id}
-                    className="px-4 py-2 bg-white border border-[#181614] hover:bg-[#181614] hover:text-white text-[#181614] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Download Invoice</span>
-                  </button>
+                <div className="bg-[#f6f2ea] px-6 py-4 border-t border-[#ded5c7] flex flex-wrap justify-between items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={(e) => handleDownloadInvoice(trackingModalOrder, e)}
+                      disabled={downloadingOrderId === trackingModalOrder.id}
+                      className="px-4 py-2 bg-white border border-[#181614] hover:bg-[#181614] hover:text-white text-[#181614] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download Invoice</span>
+                    </button>
+
+                    {isOrderCancellable(trackingModalOrder.fulfillmentStatus) && (
+                      <button
+                        onClick={() => {
+                          const toCancel = trackingModalOrder;
+                          setIsTrackingModalOpen(false);
+                          handleOpenCancelModal(toCancel);
+                        }}
+                        className="px-3.5 py-2 bg-white hover:bg-red-50 text-[#991b1b] border border-[#fecaca] hover:border-red-300 text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                      >
+                        <XCircle className="w-3.5 h-3.5 text-[#991b1b]" />
+                        <span>Cancel Order</span>
+                      </button>
+                    )}
+                  </div>
+
                   <button
                     onClick={() => setIsTrackingModalOpen(false)}
                     className="px-5 py-2 bg-[#181614] hover:bg-[#8c562e] text-white text-xs font-semibold uppercase tracking-widest rounded-xs transition-colors cursor-pointer"
@@ -1135,6 +1442,174 @@ export const AccountScreen: React.FC = () => {
           );
         })()}
       </AnimatePresence>
+
+      {/* Customer Order Cancellation Confirmation Modal */}
+      <AnimatePresence>
+        {isCancelModalOpen && orderToCancel && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/70 backdrop-blur-xs overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              transition={{ duration: 0.25 }}
+              className="bg-white border border-[#ded5c7] rounded-xs max-w-lg w-full shadow-2xl overflow-hidden my-8"
+            >
+              {/* Modal Header */}
+              <div className="bg-[#181614] text-white px-6 py-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-red-950/80 border border-red-500/40 flex items-center justify-center text-red-400">
+                    <AlertTriangle className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-[9px] uppercase tracking-widest text-[#d4af37] font-bold block">Commission Cancellation</span>
+                    <h3 className="font-serif-luxury text-lg font-bold text-white">Order {orderToCancel.id}</h3>
+                  </div>
+                </div>
+                <button
+                  onClick={() => !isSubmittingCancellation && setIsCancelModalOpen(false)}
+                  disabled={isSubmittingCancellation}
+                  className="p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded-full transition-colors cursor-pointer disabled:opacity-40"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-6 space-y-5">
+                {/* Order Summary Pill */}
+                <div className="p-4 bg-[#fbf9f5] border border-[#eee5d8] rounded-xs space-y-2 text-xs">
+                  <div className="flex justify-between items-center text-[#78716c]">
+                    <span>Placed On: <strong className="text-[#181614]">{orderToCancel.date || 'Recent'}</strong></span>
+                    <span>Total: <strong className="text-[#181614] font-serif-luxury">{formatINR(orderToCancel.total)}</strong></span>
+                  </div>
+                  <div className="pt-2 border-t border-[#eee5d8] text-[#554e47]">
+                    <span>Pieces: <strong>{(orderToCancel.items || []).map(i => `${i.productName} (x${i.quantity})`).join(', ') || 'Leather Commission'}</strong></span>
+                  </div>
+                </div>
+
+                {/* Cancellation Notice */}
+                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xs text-xs text-amber-900 space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-amber-950">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                    <span>Important Atelier Notice</span>
+                  </div>
+                  <p className="leading-relaxed text-[11.5px] text-amber-800">
+                    Cancelling will immediately stop craftsmanship and benchwork for this piece. Your tax invoice, receipt, and commission history will remain safely stored in your client archive.
+                  </p>
+                </div>
+
+                {/* Reason Selection */}
+                <div className="space-y-2">
+                  <label className="block text-xs font-bold uppercase tracking-wider text-[#181614]">
+                    Reason for Cancellation
+                  </label>
+                  <div className="space-y-2">
+                    {[
+                      'Changed mind regarding purchase',
+                      'Ordered incorrect color or leather finish',
+                      'Need to modify delivery address',
+                      'Timeline does not fit schedule',
+                      'Other'
+                    ].map(reasonOption => (
+                      <label
+                        key={reasonOption}
+                        className={`flex items-center gap-2.5 p-2.5 rounded-xs border text-xs cursor-pointer transition-colors ${
+                          selectedCancelReason === reasonOption
+                            ? 'bg-[#f6f2ea] border-[#8c562e] text-[#181614] font-medium'
+                            : 'bg-white border-[#ded5c7] text-[#6e665e] hover:bg-[#faf7f2]'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="cancellationReason"
+                          value={reasonOption}
+                          checked={selectedCancelReason === reasonOption}
+                          onChange={(e) => setSelectedCancelReason(e.target.value)}
+                          className="accent-[#8c562e]"
+                        />
+                        <span>{reasonOption}</span>
+                      </label>
+                    ))}
+                  </div>
+
+                  {selectedCancelReason === 'Other' && (
+                    <div className="pt-2">
+                      <textarea
+                        value={customCancelReason}
+                        onChange={(e) => setCustomCancelReason(e.target.value)}
+                        placeholder="Please specify the reason for cancellation..."
+                        rows={2}
+                        maxLength={300}
+                        className="w-full p-2.5 bg-[#fbf9f5] border border-[#ded5c7] rounded-xs text-xs text-[#181614] focus:outline-none focus:border-[#8c562e]"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Error display */}
+                {cancelModalError && (
+                  <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xs flex items-start gap-2">
+                    <XCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    <span>{cancelModalError}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="bg-[#f6f2ea] px-6 py-4 border-t border-[#ded5c7] flex flex-col sm:flex-row justify-end items-center gap-3">
+                <button
+                  type="button"
+                  disabled={isSubmittingCancellation}
+                  onClick={() => setIsCancelModalOpen(false)}
+                  className="w-full sm:w-auto px-5 py-2.5 bg-white border border-[#ded5c7] hover:bg-gray-100 text-[#181614] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  Keep Commission
+                </button>
+
+                <motion.button
+                  whileHover={{ scale: isSubmittingCancellation ? 1 : 1.02 }}
+                  whileTap={{ scale: isSubmittingCancellation ? 1 : 0.98 }}
+                  disabled={isSubmittingCancellation}
+                  onClick={handleConfirmCancellation}
+                  className="w-full sm:w-auto px-5 py-2.5 bg-[#991b1b] hover:bg-[#7f1d1d] text-white text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-xs cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {isSubmittingCancellation ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Processing...</span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-3.5 h-3.5" />
+                      <span>Confirm Order Cancellation</span>
+                    </>
+                  )}
+                </motion.button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Return Request Modal */}
+      {returnModalOrder && (
+        <ReturnRequestModal
+          isOpen={isReturnModalOpen}
+          onClose={() => {
+            setIsReturnModalOpen(false);
+            setReturnModalOrder(null);
+            setReturnModalItem(undefined);
+          }}
+          order={returnModalOrder}
+          item={returnModalItem}
+          existingReturn={getExistingReturnForProduct(returnModalOrder, returnModalItem)}
+          onReturnCreated={(returnReq) => {
+            setCustomerReturns(prev => [returnReq, ...prev.filter(r => r.returnRequestId !== returnReq.returnRequestId)]);
+            showToast(`Return request ${returnReq.returnRequestId} registered. Check unboxing email instructions.`);
+            setActiveTab('returns');
+          }}
+        />
+      )}
 
     </div>
   );

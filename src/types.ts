@@ -57,6 +57,8 @@ export interface Product {
   isNewArrival?: boolean;
   productHighlights?: ProductHighlight[];
   reviews?: ProductReview[];
+  variantGroup?: string;
+  linkedVariantIds?: string[];
 }
 
 export interface CartItem {
@@ -70,9 +72,9 @@ export interface CartItem {
 
 export type PaymentMethodType = 'Razorpay' | 'Debit Card' | 'UPI' | 'Net Banking' | 'Cash on Delivery (COD)';
 
-export type FulfillmentStatus = 'CRAFTING' | 'CONFIRMED' | 'SHIPPED' | 'PROCESSING' | 'DELIVERED';
+export type FulfillmentStatus = 'PROCESSING' | 'CRAFTING' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
 
-export type PaymentStatus = 'Paid' | 'Pending' | 'Failed';
+export type PaymentStatus = 'Paid' | 'Pending' | 'Failed' | 'Refunded';
 
 export interface TimelineStep {
   key: string;
@@ -233,6 +235,8 @@ export interface Order {
   razorpaySignature?: string;
 }
 
+export type OrderItem = Order['items'][number];
+
 export interface RazorpayOrderResponse {
   success: boolean;
   orderId: string;
@@ -308,4 +312,90 @@ export interface AdminMetrics {
     month: string;
     revenue: number;
   }[];
+}
+
+// ==============================================================================
+// RETURN & REFUND MANAGEMENT TYPES
+// ==============================================================================
+
+export type ReturnReason = 'WRONG_PRODUCT' | 'DEFECTIVE_PRODUCT' | 'MISSING_PRODUCT_PART';
+
+export type ReturnStatus = 
+  | 'RETURN_REQUESTED'
+  | 'RETURN_APPROVED'
+  | 'RETURN_REJECTED'
+  | 'PICKUP_SCHEDULED'
+  | 'PICKED_UP'
+  | 'IN_TRANSIT'
+  | 'RETURN_RECEIVED'
+  | 'INSPECTION_COMPLETED'
+  | 'REFUND_INITIATED'
+  | 'REFUNDED'
+  | 'RETURN_COMPLETED';
+
+export type ReturnRefundStatus = 'NOT_APPLICABLE' | 'PENDING' | 'INITIATED' | 'COMPLETED' | 'FAILED';
+
+export type ReturnInspectionResult = 'PENDING' | 'PASSED' | 'FAILED';
+
+export interface ReturnStatusHistory {
+  id: string;
+  returnRequestId: string;
+  oldStatus?: string;
+  newStatus: ReturnStatus;
+  changedBy: string;
+  changedByRole: 'CUSTOMER' | 'ADMIN' | 'SYSTEM';
+  note?: string;
+  createdAt: string;
+}
+
+export interface ReturnRequest {
+  id: string;
+  returnRequestId: string; // e.g. 'RET-SB-1024'
+  orderId: string;
+  orderItemId?: string;
+  customerId?: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone?: string;
+  productId?: string;
+  productName: string;
+  productImage?: string;
+  productSku?: string;
+  quantity: number;
+  itemPrice: number;
+  paidAmount: number;
+  reason: ReturnReason;
+  description: string;
+  evidenceEmailConfirmed: boolean;
+  status: ReturnStatus;
+  deliveryAtSubmission: string;
+  returnDeadline: string;
+  requestedAt: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  rejectedAt?: string;
+  rejectedBy?: string;
+  rejectionReason?: string;
+  courierName?: string;
+  trackingNumber?: string;
+  pickupNotes?: string;
+  pickupScheduledAt?: string;
+  pickedUpAt?: string;
+  inTransitAt?: string;
+  receivedAt?: string;
+  inspectionResult?: ReturnInspectionResult;
+  inspectionNotes?: string;
+  inspectionAt?: string;
+  inspectedBy?: string;
+  refundAmount: number;
+  refundStatus: ReturnRefundStatus;
+  refundReference?: string;
+  refundFailureReason?: string;
+  refundInitiatedAt?: string;
+  refundedAt?: string;
+  completedAt?: string;
+  adminNotes?: string;
+  createdAt: string;
+  updatedAt?: string;
+  history?: ReturnStatusHistory[];
 }

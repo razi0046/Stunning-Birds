@@ -1,5 +1,3 @@
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
 import { Order, Product, UserProfile } from '../types';
 import brandLogo from '../assets/images/stunning_birds_dark_text_transparent.png';
 
@@ -210,6 +208,9 @@ export async function generateAndDownloadInvoicePDF(
   }
 
   // Initialize jsPDF with A4 portrait
+  const { jsPDF } = await import('jspdf');
+  const { default: autoTable } = await import('jspdf-autotable');
+
   const doc = new jsPDF({
     orientation: 'portrait',
     unit: 'mm',

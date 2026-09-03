@@ -152,6 +152,93 @@ export const INITIAL_PRODUCTS: Product[] = [
       'https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?auto=format&fit=crop&w=1200&q=80', // Burnished perimeter stitches
       'https://images.unsplash.com/photo-1512496015851-a90fb38ba796?auto=format&fit=crop&w=1200&q=80', // Flatlay with pen & vintage watch
     ],
+    variantGroup: 'Heritage Bifold Series',
+    linkedVariantIds: ['prod-heritage-bifold-cognac', 'prod-heritage-bifold-noir'],
+  },
+  {
+    id: 'prod-heritage-bifold-cognac',
+    sku: 'SB-WLT-001-CGN',
+    skuId: 'SB-WLT-001-CGN',
+    name: 'Heritage Bifold Wallet',
+    slug: 'heritage-bifold-wallet-cognac',
+    price: 14990,
+    sellingPrice: 14990,
+    originalPrice: 18990,
+    mrp: 18990,
+    category: 'Bifold Wallets',
+    colorName: 'Cognac Bridle',
+    colorHex: '#7b3f1d',
+    material: 'Full-Grain Tuscan Calfskin & Waxed Linen Stitching',
+    dimensions: '4.25" W x 3.25" H x 0.4" D',
+    rating: 4.9,
+    reviewsCount: 78,
+    badge: 'BEST SELLER',
+    inStock: true,
+    stockQuantity: 28,
+    featured: false,
+    monogramAvailable: true,
+    description: 'Crafted from rich cognac Tuscan calfskin, developing an opulent golden patina with daily handling. Precision stitched with beeswax-burnished edges.',
+    materialsDetails: 'Full-grain Italian calfskin tanned with natural chestnut extracts. Saddle stitched with French polyart thread.',
+    careInstructions: 'Buff gently with a soft cotton cloth and treat periodically with organic beeswax balm.',
+    shippingInfo: 'Complimentary express courier delivery across India & worldwide.',
+    productHighlights: [
+      { label: 'Material', value: 'Full-Grain Tuscan Calfskin Leather' },
+      { label: 'Color', value: 'Cognac Bridle Brown' },
+      { label: 'Type', value: 'Card and Money Organisers' },
+      { label: 'Net Quantity (N)', value: '1' },
+      { label: 'No. of Compartments', value: '2 Billfolds + 8 Card Slots' },
+      { label: 'Brand', value: 'STUNNING BIRDS' },
+      { label: 'Country of Origin', value: 'India' },
+    ],
+    images: [
+      'https://images.unsplash.com/photo-1553062407-98eeb64c6a62?auto=format&fit=crop&w=1200&q=80', // Warm caramel cognac bifold held in hand
+      'https://images.unsplash.com/photo-1517254793880-9943644f128e?auto=format&fit=crop&w=1200&q=80', // Cognac bifold fold & edge
+      'https://images.unsplash.com/photo-1586495777744-4413f21062fa?auto=format&fit=crop&w=1200&q=80', // Fine edge creasing and wax stitch
+    ],
+    variantGroup: 'Heritage Bifold Series',
+    linkedVariantIds: ['prod-heritage-bifold', 'prod-heritage-bifold-noir'],
+  },
+  {
+    id: 'prod-heritage-bifold-noir',
+    sku: 'SB-WLT-001-BLK',
+    skuId: 'SB-WLT-001-BLK',
+    name: 'Heritage Bifold Wallet',
+    slug: 'heritage-bifold-wallet-noir',
+    price: 15490,
+    sellingPrice: 15490,
+    originalPrice: 19490,
+    mrp: 19490,
+    category: 'Bifold Wallets',
+    colorName: 'Noir Black',
+    colorHex: '#181614',
+    material: 'Full-Grain Tuscan Calfskin & Waxed Linen Stitching',
+    dimensions: '4.25" W x 3.25" H x 0.4" D',
+    rating: 5.0,
+    reviewsCount: 34,
+    badge: 'LIMITED',
+    inStock: false, // Out of stock to test disabled/unavailable variant
+    stockQuantity: 0,
+    featured: false,
+    monogramAvailable: true,
+    description: 'Imbued with deep midnight iron dye for an austere, timeless aesthetic. Currently sold out in the atelier and handcrafted on bespoke reservation.',
+    materialsDetails: 'Full-grain Italian calfskin with deep vegetable dye and charcoal waxed thread.',
+    careInstructions: 'Store in protective flannel pouch when not in carry.',
+    shippingInfo: 'Crafted on atelier reservation. Dispatched when next batch completes.',
+    productHighlights: [
+      { label: 'Material', value: 'Full-Grain Tuscan Calfskin Leather' },
+      { label: 'Color', value: 'Noir Midnight Black' },
+      { label: 'Type', value: 'Card and Money Organisers' },
+      { label: 'Net Quantity (N)', value: '1' },
+      { label: 'No. of Compartments', value: '2 Billfolds + 8 Card Slots' },
+      { label: 'Brand', value: 'STUNNING BIRDS' },
+      { label: 'Country of Origin', value: 'India' },
+    ],
+    images: [
+      'https://images.unsplash.com/photo-1566150905458-1bf1fc113f0d?auto=format&fit=crop&w=1200&q=80',
+      'https://images.unsplash.com/photo-1549465220-1a8b9238cd48?auto=format&fit=crop&w=1200&q=80',
+    ],
+    variantGroup: 'Heritage Bifold Series',
+    linkedVariantIds: ['prod-heritage-bifold', 'prod-heritage-bifold-cognac'],
   },
   {
     id: 'prod-essential-bifold',
@@ -238,6 +325,8 @@ export const INITIAL_PRODUCTS: Product[] = [
       'https://images.unsplash.com/photo-1598532163257-ae3c6b2524b6?auto=format&fit=crop&w=1200&q=80', // Minimalist cardholder flatlay
       'https://images.unsplash.com/photo-1563245372-f21724e3856d?auto=format&fit=crop&w=1200&q=80', // Thumb slot detail
     ],
+    variantGroup: 'Slim Cardholder Collection',
+    linkedVariantIds: ['prod-pocket-organizer'],
   },
   {
     id: 'prod-the-continental',
@@ -322,6 +411,8 @@ export const INITIAL_PRODUCTS: Product[] = [
       'https://images.unsplash.com/photo-1549465220-1a8b9238cd48?auto=format&fit=crop&w=1200&q=80', // Deep midnight vertical leather card organizer
       'https://images.unsplash.com/photo-1614179689702-355944cd0918?auto=format&fit=crop&w=1200&q=80', // Hand-painted edge profile
     ],
+    variantGroup: 'Slim Cardholder Collection',
+    linkedVariantIds: ['prod-slim-cardholder'],
   },
   {
     id: 'prod-quilted-bridle-bag',

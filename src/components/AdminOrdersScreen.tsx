@@ -27,13 +27,17 @@ import {
   Square,
   FileDown,
   Trash2,
-  AlertTriangle
+  AlertTriangle,
+  RotateCcw,
+  XCircle,
+  CreditCard
 } from 'lucide-react';
 import { useShop } from '../context/ShopContext';
-import { Order } from '../types';
+import { Order, FulfillmentStatus } from '../types';
 import { formatINR } from '../utils/formatCurrency';
 import { ShippingLabelModal } from './ShippingLabelModal';
 import { ShippingLabelView } from './ShippingLabelView';
+import { AdminReturnsManagement } from './AdminReturnsManagement';
 import { 
   generateShippingLabelData, 
   downloadShippingLabelPDF, 
@@ -45,8 +49,10 @@ export const AdminOrdersScreen: React.FC = () => {
   const { 
     orders, 
     updateOrderStatus, 
+    bulkUpdateOrderStatus,
     updateOrderShippingLabel, 
     deleteOrder,
+    markOrderAsRefunded,
     setCurrentScreen, 
     exportOrdersCSV, 
     refetchOrders,
@@ -55,6 +61,7 @@ export const AdminOrdersScreen: React.FC = () => {
     showToast 
   } = useShop();
   
+  const [adminView, setAdminView] = useState<'orders' | 'returns'>('orders');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -62,6 +69,40 @@ export const AdminOrdersScreen: React.FC = () => {
   const [copiedAwb, setCopiedAwb] = useState<string | null>(null);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [isDeletingOrder, setIsDeletingOrder] = useState(false);
+  const [orderToRefund, setOrderToRefund] = useState<Order | null>(null);
+  const [isRefundingOrder, setIsRefundingOrder] = useState(false);
+
+  // Helper to identify prepaid orders (Razorpay, UPI, Cards, Net Banking - NOT COD)
+  const isPrepaidOrder = (paymentMethod?: string) => {
+    if (!paymentMethod) return false;
+    const m = paymentMethod.toLowerCase().trim();
+    return !m.includes('cash on delivery') && !m.includes('(cod)') && m !== 'cod';
+  };
+
+  // Helper to determine if order is eligible for manual refund action
+  // Strict rule: Only cancelled prepaid orders with payment status 'Paid'
+  const isEligibleForRefundAction = (order: Order) => {
+    const isCancelled = (order.fulfillmentStatus || '').toUpperCase() === 'CANCELLED';
+    const isPaid = (order.paymentStatus || '').toLowerCase() === 'paid';
+    const isPrepaid = isPrepaidOrder(order.paymentMethod);
+    return isCancelled && isPaid && isPrepaid;
+  };
+
+  const handleConfirmMarkRefunded = async () => {
+    if (!orderToRefund) return;
+    setIsRefundingOrder(true);
+    try {
+      const res = await markOrderAsRefunded(orderToRefund.id);
+      if (res.success) {
+        if (selectedOrder && (selectedOrder.id === orderToRefund.id || selectedOrder.id.replace(/^#/, '') === orderToRefund.id.replace(/^#/, ''))) {
+          setSelectedOrder(prev => prev ? { ...prev, paymentStatus: 'Refunded' } : null);
+        }
+        setOrderToRefund(null);
+      }
+    } finally {
+      setIsRefundingOrder(false);
+    }
+  };
 
   const handleConfirmDeleteOrder = async () => {
     if (!orderToDelete) return;
@@ -112,6 +153,23 @@ export const AdminOrdersScreen: React.FC = () => {
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
   const [singleDownloadingId, setSingleDownloadingId] = useState<string | null>(null);
 
+  // Bulk Fulfillment Status Update state
+  const [bulkFulfillmentStatus, setBulkFulfillmentStatus] = useState<FulfillmentStatus>('PROCESSING');
+  const [isBulkUpdating, setIsBulkUpdating] = useState(false);
+  const [isBulkCancelModalOpen, setIsBulkCancelModalOpen] = useState(false);
+  const [bulkCancelReason, setBulkCancelReason] = useState('Administrative Decision');
+  const [bulkCancelNote, setBulkCancelNote] = useState('');
+
+  const selectedOrders = useMemo(() => {
+    return (orders || []).filter(o => selectedOrderIds.includes(o.id));
+  }, [orders, selectedOrderIds]);
+
+  const eligibleForCancelCount = useMemo(() => {
+    return selectedOrders.filter(o => o.fulfillmentStatus === 'PROCESSING' || o.fulfillmentStatus === 'CRAFTING').length;
+  }, [selectedOrders]);
+
+  const canCancelSelected = eligibleForCancelCount > 0;
+
   const filteredOrders = useMemo(() => {
     return (orders || []).filter(o => {
       if (!o) return false;
@@ -153,6 +211,48 @@ export const AdminOrdersScreen: React.FC = () => {
     setSelectedOrderIds(prev => 
       prev.includes(orderId) ? prev.filter(id => id !== orderId) : [...prev, orderId]
     );
+  };
+
+  // Bulk Status Apply Handler
+  const handleApplyBulkStatus = async (targetStatus?: FulfillmentStatus) => {
+    const statusToApply = targetStatus || bulkFulfillmentStatus;
+    if (!selectedOrderIds || selectedOrderIds.length === 0) {
+      showToast('Please select at least one order to update.');
+      return;
+    }
+
+    if (statusToApply === 'CANCELLED') {
+      if (!canCancelSelected) {
+        showToast('None of the selected orders can be cancelled (already Shipped, Delivered, or Cancelled).');
+        return;
+      }
+      setIsBulkCancelModalOpen(true);
+      return;
+    }
+
+    setIsBulkUpdating(true);
+    try {
+      const result = await bulkUpdateOrderStatus(selectedOrderIds, statusToApply);
+      if (result.success) {
+        // Status updated and refetched
+      }
+    } catch (err: any) {
+      console.error('Error applying bulk status:', err);
+    } finally {
+      setIsBulkUpdating(false);
+    }
+  };
+
+  const handleConfirmBulkCancel = async () => {
+    setIsBulkCancelModalOpen(false);
+    setIsBulkUpdating(true);
+    try {
+      await bulkUpdateOrderStatus(selectedOrderIds, 'CANCELLED');
+    } catch (err: any) {
+      console.error('Error executing bulk cancellation:', err);
+    } finally {
+      setIsBulkUpdating(false);
+    }
   };
 
   // Single label direct PDF download
@@ -230,6 +330,8 @@ export const AdminOrdersScreen: React.FC = () => {
         return 'bg-[#f3e8ff] text-[#6b21a8] border-[#e9d5ff]';
       case 'DELIVERED':
         return 'bg-[#dcfce7] text-[#166534] border-[#bbf7d0]';
+      case 'CANCELLED':
+        return 'bg-[#fee2e2] text-[#991b1b] border-[#fecaca]';
       default:
         return 'bg-[#f6f2ea] text-[#8c562e] border-[#e4d9cb]';
     }
@@ -273,15 +375,34 @@ export const AdminOrdersScreen: React.FC = () => {
             </button>
 
             <button
-              className="w-full flex items-center justify-between px-3.5 py-3 rounded-xs bg-[#2e2824] text-white border-l-2 border-[#d4af37] cursor-pointer"
+              onClick={() => setAdminView('orders')}
+              className={`w-full flex items-center justify-between px-3.5 py-3 rounded-xs transition-colors cursor-pointer ${
+                adminView === 'orders'
+                  ? 'bg-[#2e2824] text-white border-l-2 border-[#d4af37]'
+                  : 'text-[#a8a199] hover:bg-[#262320] hover:text-white'
+              }`}
             >
               <div className="flex items-center space-x-3">
-                <ShoppingBag className="w-4 h-4 text-[#d4af37]" />
+                <ShoppingBag className={`w-4 h-4 ${adminView === 'orders' ? 'text-[#d4af37]' : ''}`} />
                 <span>Orders</span>
               </div>
               <span className="px-2 py-0.5 rounded-full bg-[#8c562e] text-[10px] text-white font-bold">
                 {orders.length}
               </span>
+            </button>
+
+            <button
+              onClick={() => setAdminView('returns')}
+              className={`w-full flex items-center justify-between px-3.5 py-3 rounded-xs transition-colors cursor-pointer ${
+                adminView === 'returns'
+                  ? 'bg-[#2e2824] text-white border-l-2 border-[#d4af37]'
+                  : 'text-[#a8a199] hover:bg-[#262320] hover:text-white'
+              }`}
+            >
+              <div className="flex items-center space-x-3">
+                <RotateCcw className={`w-4 h-4 ${adminView === 'returns' ? 'text-[#d4af37]' : ''}`} />
+                <span>Returns & Refunds</span>
+              </div>
             </button>
 
             <button
@@ -329,16 +450,37 @@ export const AdminOrdersScreen: React.FC = () => {
 
       </aside>
 
-      {/* Main Orders Table View */}
-      <main className="flex-1 p-6 sm:p-8 lg:p-10 space-y-6 max-w-7xl">
-        
-        {/* Header Bar */}
-        <motion.div
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 }}
-          className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 pb-4 border-b border-[#e4dcd0]"
-        >
+      {/* Main Orders Table View or Returns Management View */}
+      <main className="flex-1 p-6 sm:p-8 lg:p-10 space-y-6 max-w-7xl lg:max-w-none w-full">
+        {adminView === 'returns' ? (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 border-b border-[#e4dcd0]">
+              <div>
+                <h1 className="font-serif-luxury text-3xl font-bold text-[#181614]">
+                  Returns &amp; Refund Management
+                </h1>
+                <p className="text-xs sm:text-sm text-[#78716c] mt-0.5">
+                  Approve/reject returns, coordinate reverse logistics, perform physical Atelier inspection in Kolkata, and trigger verified refunds.
+                </p>
+              </div>
+              <button
+                onClick={() => setAdminView('orders')}
+                className="px-4 py-2 bg-white border border-[#ded5c7] text-[#181614] hover:bg-neutral-50 text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors cursor-pointer"
+              >
+                Back to Orders
+              </button>
+            </div>
+            <AdminReturnsManagement />
+          </div>
+        ) : (
+          <>
+            {/* Header Bar */}
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.4 }}
+              className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 pb-4 border-b border-[#e4dcd0]"
+            >
           <div>
             <h1 className="font-serif-luxury text-3xl font-bold text-[#181614]">
               Order Management
@@ -367,6 +509,49 @@ export const AdminOrdersScreen: React.FC = () => {
               )}
               <span>{allFilteredSelected ? 'Deselect All' : `Select All (${filteredOrders.length})`}</span>
             </motion.button>
+
+            {/* Bulk Status Update Control (When 1+ Orders Selected) */}
+            {selectedOrderIds.length > 0 && (
+              <div className="flex items-center gap-1 bg-[#f6f2ea] p-1 border border-[#ded5c7] rounded-xs shadow-2xs">
+                <span className="text-[11px] font-semibold text-[#8c562e] uppercase tracking-wider px-1.5 hidden sm:inline-block">
+                  Status:
+                </span>
+                <select
+                  id="bulk-status-header-select"
+                  value={bulkFulfillmentStatus}
+                  onChange={(e) => setBulkFulfillmentStatus(e.target.value as FulfillmentStatus)}
+                  disabled={isBulkUpdating}
+                  className="bg-white border border-[#ded5c7] text-[#181614] text-xs font-bold py-1.5 px-2 rounded-xs focus:outline-hidden focus:border-[#8c562e] cursor-pointer disabled:opacity-50"
+                  title="Select fulfillment status to apply to selected orders"
+                >
+                  <option value="PROCESSING">Processing</option>
+                  <option value="CRAFTING">Crafting</option>
+                  <option value="SHIPPED">Shipped</option>
+                  <option value="DELIVERED">Delivered</option>
+                  <option value="CANCELLED">Cancelled</option>
+                </select>
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  disabled={isBulkUpdating}
+                  onClick={() => handleApplyBulkStatus()}
+                  className="px-3 py-1.5 bg-[#8c562e] hover:bg-[#734320] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 shadow-2xs transition-all cursor-pointer disabled:opacity-50"
+                  title="Apply status update to all selected orders"
+                >
+                  {isBulkUpdating ? (
+                    <>
+                      <RefreshCw className="w-3 h-3 animate-spin text-white" />
+                      <span>Applying...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-[#d4af37]" />
+                      <span>Apply</span>
+                    </>
+                  )}
+                </motion.button>
+              </div>
+            )}
 
             {/* Bulk Download All / Selected Shipping Labels Button */}
             <motion.button
@@ -400,47 +585,104 @@ export const AdminOrdersScreen: React.FC = () => {
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              onClick={exportOrdersCSV}
+              onClick={() => {
+                const targetOrders = selectedOrderIds.length > 0
+                  ? orders.filter(o => selectedOrderIds.includes(o.id))
+                  : filteredOrders;
+                exportOrdersCSV(targetOrders);
+              }}
               className="px-3.5 py-2 bg-white border border-[#ded5c7] hover:border-[#8c562e] text-xs font-semibold text-[#181614] uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors shadow-2xs cursor-pointer"
+              title="Export selected orders to Delhivery Excel (.xlsx)"
             >
               <Download className="w-3.5 h-3.5 text-[#8c562e]" />
-              <span>Export CSV</span>
+              <span>{selectedOrderIds.length > 0 ? `Export CSV (${selectedOrderIds.length})` : 'Export CSV'}</span>
             </motion.button>
           </div>
         </motion.div>
 
         {/* Selection Banner (When 1+ items selected) */}
         {selectedOrderIds.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="bg-[#181614] text-[#faf7f2] px-4 py-3 rounded-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md"
+          <div
+            id="admin-orders-selection-banner"
+            className="bg-[#181614] text-[#faf7f2] px-4 py-3 rounded-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-md border border-[#2d2925] w-full"
           >
             <div className="flex items-center gap-2.5">
               <span className="w-2 h-2 rounded-full bg-[#d4af37] animate-pulse" />
               <span className="text-xs font-medium">
-                <strong className="text-[#d4af37] font-bold">{selectedOrderIds.length}</strong> of {orders.length} orders selected for batch processing
+                <strong className="text-[#d4af37] font-bold">{selectedOrderIds.length}</strong> of {orders.length} orders selected
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
               <button
                 onClick={() => handleDownloadAllLabels()}
                 disabled={isBatchDownloading}
-                className="px-3 py-1.5 bg-[#8c562e] hover:bg-[#a66838] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                className="px-3.5 py-2 bg-[#8c562e] hover:bg-[#a66838] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
               >
-                <Download className="w-3 h-3 text-[#d4af37]" />
+                <Download className="w-3.5 h-3.5 text-[#d4af37]" />
                 <span>Download {selectedOrderIds.length} PDF Labels</span>
               </button>
+
+              {/* Export Delhivery Excel (.xlsx) for selected orders */}
+              <button
+                onClick={() => {
+                  const targetOrders = orders.filter(o => selectedOrderIds.includes(o.id));
+                  exportOrdersCSV(targetOrders);
+                }}
+                className="px-3.5 py-2 bg-[#25211d] hover:bg-[#38332e] text-[#faf7f2] text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors cursor-pointer border border-[#443d35]"
+                title="Export selected orders to Delhivery Excel (.xlsx)"
+              >
+                <FileDown className="w-3.5 h-3.5 text-[#d4af37]" />
+                <span>Export CSV ({selectedOrderIds.length})</span>
+              </button>
+
+              {/* Update Status dropdown + Apply button */}
+              <div className="flex items-center gap-1.5 bg-[#25211d] p-1.5 border border-[#443d35] rounded-xs shadow-inner">
+                <label htmlFor="bulk-status-banner-select" className="text-[11px] font-semibold text-[#d4af37] uppercase tracking-wider px-1.5 whitespace-nowrap">
+                  Update Status:
+                </label>
+                <select
+                  id="bulk-status-banner-select"
+                  value={bulkFulfillmentStatus}
+                  onChange={(e) => setBulkFulfillmentStatus(e.target.value as FulfillmentStatus)}
+                  disabled={isBulkUpdating}
+                  className="bg-[#181614] border border-[#554c43] text-white text-xs font-semibold py-1.5 px-2.5 rounded-xs focus:outline-hidden focus:border-[#d4af37] cursor-pointer disabled:opacity-50"
+                  title="Select fulfillment status to apply"
+                >
+                  <option value="PROCESSING">Processing</option>
+                  <option value="CRAFTING">Crafting</option>
+                  <option value="SHIPPED">Shipped</option>
+                  <option value="DELIVERED">Delivered</option>
+                  <option value="CANCELLED">Cancelled</option>
+                </select>
+                <button
+                  id="bulk-status-banner-apply-btn"
+                  onClick={() => handleApplyBulkStatus()}
+                  disabled={isBulkUpdating}
+                  className="px-3 py-1.5 bg-[#8c562e] hover:bg-[#a66838] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-xs"
+                >
+                  {isBulkUpdating ? (
+                    <>
+                      <RefreshCw className="w-3 h-3 animate-spin text-white" />
+                      <span>Applying...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-[#d4af37]" />
+                      <span>Apply</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
               <button
                 onClick={() => setSelectedOrderIds([])}
-                className="px-2.5 py-1.5 bg-[#2a2622] hover:bg-[#38332e] text-[#a8a199] hover:text-white text-xs font-medium uppercase tracking-wider rounded-xs transition-colors cursor-pointer"
+                className="px-3 py-2 bg-[#2a2622] hover:bg-[#38332e] text-[#a8a199] hover:text-white text-xs font-medium uppercase tracking-wider rounded-xs transition-colors cursor-pointer"
               >
                 Clear Selection
               </button>
             </div>
-          </motion.div>
+          </div>
         )}
 
         {/* Search & Filters */}
@@ -464,7 +706,7 @@ export const AdminOrdersScreen: React.FC = () => {
 
           <div className="flex items-center space-x-2 w-full sm:w-auto overflow-x-auto">
             <span className="text-xs text-[#8c857d] uppercase tracking-wider mr-1">Status:</span>
-            {['All', 'CRAFTING', 'SHIPPED', 'PROCESSING', 'DELIVERED'].map(st => (
+            {['All', 'PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED'].map(st => (
               <button
                 key={st}
                 onClick={() => setStatusFilter(st)}
@@ -596,10 +838,27 @@ export const AdminOrdersScreen: React.FC = () => {
                             </span>
                           </div>
                           <div>
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#dcfce7] text-[#166534] border border-[#bbf7d0]">
-                              <CheckCircle className="w-2.5 h-2.5" />
-                              {order.paymentStatus}
-                            </span>
+                            {order.paymentStatus === 'Refunded' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#f3e8ff] text-[#6b21a8] border border-[#e9d5ff]">
+                                <RotateCcw className="w-2.5 h-2.5 text-[#7e22ce]" />
+                                Refunded
+                              </span>
+                            ) : order.paymentStatus === 'Paid' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#dcfce7] text-[#166534] border border-[#bbf7d0]">
+                                <CheckCircle className="w-2.5 h-2.5" />
+                                Paid
+                              </span>
+                            ) : order.paymentStatus === 'Failed' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-red-50 text-red-800 border border-red-200">
+                                <XCircle className="w-2.5 h-2.5" />
+                                Failed
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
+                                <Clock className="w-2.5 h-2.5" />
+                                {order.paymentStatus || 'Pending'}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </td>
@@ -625,6 +884,23 @@ export const AdminOrdersScreen: React.FC = () => {
                       <td className="py-4 px-4 sm:px-6 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-2">
                           
+                          {/* Mark as Refunded Action Button for Cancelled Prepaid Orders */}
+                          {isEligibleForRefundAction(order) && (
+                            <motion.button
+                              whileHover={{ scale: 1.04 }}
+                              whileTap={{ scale: 0.96 }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOrderToRefund(order);
+                              }}
+                              className="px-2.5 py-1.5 bg-[#f3e8ff] hover:bg-[#7e22ce] text-[#6b21a8] hover:text-white text-xs font-bold uppercase tracking-wider rounded-xs border border-[#d8b4fe] hover:border-[#7e22ce] transition-all cursor-pointer inline-flex items-center gap-1.5 shadow-2xs"
+                              title={`Mark cancelled prepaid order ${order.id} as Refunded (after manual Razorpay refund)`}
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>Mark Refunded</span>
+                            </motion.button>
+                          )}
+
                           {/* Direct Download Label Button */}
                           <motion.button
                             whileHover={{ scale: 1.04 }}
@@ -679,6 +955,8 @@ export const AdminOrdersScreen: React.FC = () => {
 
           </table>
         </motion.div>
+          </>
+        )}
 
       </main>
 
@@ -771,12 +1049,53 @@ export const AdminOrdersScreen: React.FC = () => {
                     </p>
                     <div className="mt-2 flex items-center gap-2">
                       <span className="text-[11px] text-[#78716c]">Payment:</span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#dcfce7] text-[#166534] border border-[#bbf7d0]">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                        selectedOrder.paymentStatus === 'Refunded'
+                          ? 'bg-[#f3e8ff] text-[#6b21a8] border border-[#e9d5ff]'
+                          : selectedOrder.paymentStatus === 'Paid'
+                          ? 'bg-[#dcfce7] text-[#166534] border border-[#bbf7d0]'
+                          : 'bg-amber-50 text-amber-800 border border-amber-200'
+                      }`}>
                         {selectedOrder.paymentStatus} ({selectedOrder.paymentMethod})
                       </span>
                     </div>
                   </div>
                 </div>
+
+                {/* Cancelled Prepaid Order Refund Action Callout */}
+                {isEligibleForRefundAction(selectedOrder) && (
+                  <div className="p-4 bg-[#fbf5ff] border border-[#e9d5ff] rounded-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
+                    <div className="flex items-start gap-2.5">
+                      <div className="p-1.5 bg-[#7e22ce] text-white rounded-xs shrink-0 mt-0.5">
+                        <RotateCcw className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h5 className="text-xs font-bold text-[#581c87] uppercase tracking-wider">Cancelled Prepaid Commission</h5>
+                        <p className="text-xs text-[#6b21a8] leading-relaxed">
+                          This prepaid online order was cancelled. Once you manually process the refund in the Razorpay Dashboard, record it here to update Supabase to Refunded.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setOrderToRefund(selectedOrder)}
+                      className="px-3.5 py-2 bg-[#7e22ce] hover:bg-[#6b21a8] text-white text-xs font-bold uppercase tracking-wider rounded-xs transition-colors shadow-2xs flex items-center gap-1.5 cursor-pointer shrink-0"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Mark as Refunded</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Already Refunded Notice for Cancelled Prepaid Orders */}
+                {(selectedOrder.fulfillmentStatus === 'CANCELLED' && selectedOrder.paymentStatus === 'Refunded') && (
+                  <div className="p-3.5 bg-[#fbf5ff] border border-[#e9d5ff] rounded-xs flex items-center gap-2.5 text-xs text-[#6b21a8]">
+                    <CheckCircle className="w-4 h-4 text-[#7e22ce] shrink-0" />
+                    <span>
+                      <strong>Refund Recorded:</strong> This cancelled commission has been marked as refunded in Supabase and the Patron Customer Portal.
+                    </span>
+                  </div>
+                )}
 
                 {/* Items List */}
                 <div className="space-y-3">
@@ -921,8 +1240,8 @@ export const AdminOrdersScreen: React.FC = () => {
                 {/* Status Update Controls */}
                 <div className="p-4 bg-[#f6f2ea] border border-[#ded5c7] rounded-xs space-y-3">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-[#181614]">Update Fulfillment Status</h4>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {['PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED'].map(st => (
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    {['PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED'].map(st => (
                       <button
                         key={st}
                         onClick={() => {
@@ -931,7 +1250,7 @@ export const AdminOrdersScreen: React.FC = () => {
                         }}
                         className={`py-2 px-3 rounded-xs text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer ${
                           selectedOrder.fulfillmentStatus === st
-                            ? 'bg-[#8c562e] text-white shadow-xs'
+                            ? (st === 'CANCELLED' ? 'bg-[#991b1b] text-white shadow-xs' : 'bg-[#8c562e] text-white shadow-xs')
                             : 'bg-white text-[#554e47] hover:bg-[#ede5d8] border border-[#ded5c7]'
                         }`}
                       >
@@ -944,8 +1263,8 @@ export const AdminOrdersScreen: React.FC = () => {
                 {/* Payment Status Controls */}
                 <div className="p-4 bg-[#f6f2ea] border border-[#ded5c7] rounded-xs space-y-3">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-[#181614]">Update Payment Status</h4>
-                  <div className="grid grid-cols-3 gap-2">
-                    {['Paid', 'Pending', 'Failed'].map(pst => (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {['Paid', 'Pending', 'Failed', 'Refunded'].map(pst => (
                       <button
                         key={pst}
                         onClick={() => {
@@ -954,7 +1273,7 @@ export const AdminOrdersScreen: React.FC = () => {
                         }}
                         className={`py-2 px-3 rounded-xs text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer ${
                           selectedOrder.paymentStatus === pst
-                            ? 'bg-[#15803d] text-white shadow-xs'
+                            ? (pst === 'Refunded' ? 'bg-[#7e22ce] text-white shadow-xs' : pst === 'Paid' ? 'bg-[#15803d] text-white shadow-xs' : pst === 'Failed' ? 'bg-[#991b1b] text-white shadow-xs' : 'bg-amber-600 text-white shadow-xs')
                             : 'bg-white text-[#554e47] hover:bg-[#ede5d8] border border-[#ded5c7]'
                         }`}
                       >
@@ -994,6 +1313,109 @@ export const AdminOrdersScreen: React.FC = () => {
                 </motion.button>
               </div>
 
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Admin Manual Refund Confirmation Modal */}
+      <AnimatePresence>
+        {orderToRefund && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white border border-[#ded5c7] rounded-xs shadow-2xl max-w-lg w-full overflow-hidden"
+            >
+              <div className="p-5 border-b border-[#e8dfd2] bg-[#fbf5ff] flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="w-9 h-9 rounded-full bg-purple-100 border border-purple-200 text-purple-700 flex items-center justify-center">
+                    <RotateCcw className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-serif-luxury font-bold text-base text-[#181614]">
+                      Mark Order as Refunded
+                    </h3>
+                    <p className="text-[11px] text-[#78716c]">Manual Razorpay Dashboard Refund Record</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setOrderToRefund(null)}
+                  className="p-1 text-[#8c827a] hover:text-[#181614] transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4">
+                {/* Order Details Card */}
+                <div className="p-3.5 bg-[#f6f2ea] border border-[#ded5c7] rounded-xs space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="font-mono font-bold text-xs text-[#181614]">{orderToRefund.id}</span>
+                    <span className="font-serif-luxury font-bold text-sm text-[#8c562e]">{formatINR(orderToRefund.total)}</span>
+                  </div>
+                  <div className="text-xs text-[#554e47] space-y-1">
+                    <div><strong>Customer:</strong> {orderToRefund.customer.name} ({orderToRefund.customer.email})</div>
+                    <div><strong>Order Date:</strong> {orderToRefund.date} • <strong>Fulfillment:</strong> <span className="text-red-700 font-bold">{orderToRefund.fulfillmentStatus}</span></div>
+                    <div><strong>Payment Method:</strong> {orderToRefund.paymentMethod}</div>
+                    {orderToRefund.razorpayPaymentId && (
+                      <div className="font-mono text-[11px] text-[#78716c]">
+                        <strong>Razorpay Payment ID:</strong> {orderToRefund.razorpayPaymentId}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Important Manual Refund Advisory */}
+                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xs space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-amber-900 uppercase tracking-wider">
+                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                    <span>Manual Processing Confirmation</span>
+                  </div>
+                  <ul className="text-xs text-amber-800 space-y-1 list-disc pl-4 leading-relaxed">
+                    <li>
+                      Please confirm you have <strong>manually issued the refund in your Razorpay Dashboard</strong> for this transaction.
+                    </li>
+                    <li>
+                      Confirming will update the database status to <strong>Refunded</strong> in Supabase, the Admin Orders section, and the Patron Customer Portal.
+                    </li>
+                    <li>
+                      All original transaction amounts and Razorpay reference IDs remain preserved.
+                    </li>
+                  </ul>
+                </div>
+              </div>
+
+              <div className="p-4 bg-[#fbf9f5] border-t border-[#e8dfd2] flex items-center justify-end space-x-3">
+                <button
+                  type="button"
+                  disabled={isRefundingOrder}
+                  onClick={() => setOrderToRefund(null)}
+                  className="px-4 py-2 text-xs font-semibold text-[#554e47] hover:text-[#181614] bg-white border border-[#ded5c7] hover:bg-[#f6f2ea] rounded-xs transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  id="confirm-mark-refunded-modal-btn"
+                  disabled={isRefundingOrder}
+                  onClick={handleConfirmMarkRefunded}
+                  className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-white bg-[#7e22ce] hover:bg-[#6b21a8] rounded-xs transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-75"
+                >
+                  {isRefundingOrder ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Updating in Supabase...</span>
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Confirm &amp; Mark Refunded</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
@@ -1094,6 +1516,72 @@ export const AdminOrdersScreen: React.FC = () => {
         onUpdateLabel={updateOrderShippingLabel}
         showToast={showToast}
       />
+
+      {/* Bulk Cancellation Confirmation Modal */}
+      <AnimatePresence>
+        {isBulkCancelModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-xs max-w-md w-full p-6 shadow-xl border border-[#ded5c7] space-y-4"
+            >
+              <div className="flex items-center space-x-3 text-[#991b1b]">
+                <div className="p-2 bg-red-50 rounded-full border border-red-200">
+                  <AlertTriangle className="w-5 h-5 text-red-600" />
+                </div>
+                <div>
+                  <h3 className="font-serif-luxury text-base font-bold text-[#181614]">
+                    Confirm Bulk Order Cancellation
+                  </h3>
+                  <p className="text-xs text-[#78716c]">
+                    Updating status of {eligibleForCancelCount} eligible order{eligibleForCancelCount > 1 ? 's' : ''} to CANCELLED
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3 bg-[#fdf2f2] border border-red-200 rounded-xs text-xs text-[#991b1b] space-y-1">
+                <p className="font-semibold">Important:</p>
+                <p>
+                  This action will update the fulfillment status to <strong>CANCELLED</strong> in Supabase and synchronize the customer timeline. Orders already Shipped or Delivered will be safely skipped.
+                </p>
+              </div>
+
+              <div className="space-y-2 text-xs">
+                <label className="font-semibold text-[#181614] block">Reason for Cancellation:</label>
+                <select
+                  value={bulkCancelReason}
+                  onChange={(e) => setBulkCancelReason(e.target.value)}
+                  className="w-full bg-[#fbf9f5] border border-[#ded5c7] p-2 rounded-xs font-medium focus:outline-hidden focus:border-[#8c562e]"
+                >
+                  <option value="Administrative Decision">Administrative Decision</option>
+                  <option value="Inventory Unavailable">Inventory / Raw Material Unavailable</option>
+                  <option value="Customer Cancellation Request">Patron Cancellation Request</option>
+                  <option value="Fraudulent or Duplicate Order">Suspicious / Duplicate Order</option>
+                </select>
+              </div>
+
+              <div className="flex justify-end space-x-2.5 pt-2 border-t border-[#f0eae0]">
+                <button
+                  onClick={() => setIsBulkCancelModalOpen(false)}
+                  className="px-4 py-2 bg-white hover:bg-gray-50 border border-[#ded5c7] text-[#554e47] text-xs font-semibold uppercase tracking-wider rounded-xs cursor-pointer"
+                >
+                  Go Back
+                </button>
+                <button
+                  id="confirm-bulk-cancel-btn"
+                  onClick={handleConfirmBulkCancel}
+                  className="px-4 py-2 bg-[#991b1b] hover:bg-[#7f1d1d] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center space-x-1.5 shadow-xs cursor-pointer"
+                >
+                  <XCircle className="w-3.5 h-3.5" />
+                  <span>Confirm Cancellation</span>
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

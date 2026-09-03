@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS public.orders (
   total NUMERIC(10, 2) NOT NULL DEFAULT 0,
   payment_method TEXT NOT NULL,
   payment_status TEXT NOT NULL DEFAULT 'Paid' CHECK (payment_status IN ('Paid', 'Pending', 'Failed', 'paid', 'pending', 'failed')),
-  fulfillment_status TEXT NOT NULL DEFAULT 'CRAFTING' CHECK (fulfillment_status IN ('CRAFTING', 'SHIPPED', 'PROCESSING', 'DELIVERED', 'CONFIRMED', 'confirmed')),
+  fulfillment_status TEXT NOT NULL DEFAULT 'PROCESSING' CHECK (fulfillment_status IN ('PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED')),
   razorpay_order_id TEXT,
   razorpay_payment_id TEXT,
   razorpay_signature TEXT,
@@ -413,6 +413,24 @@ CREATE POLICY "Only admins can update orders"
   TO authenticated
   USING (public.is_admin())
   WITH CHECK (public.is_admin());
+
+CREATE POLICY "orders_cancel_customer"
+  ON public.orders FOR UPDATE
+  TO authenticated
+  USING (
+    (
+      auth.uid() = user_id 
+      OR (customer_email IS NOT NULL AND lower(customer_email) = lower(coalesce(auth.jwt()->>'email', '')))
+    )
+    AND fulfillment_status IN ('PROCESSING', 'CRAFTING')
+  )
+  WITH CHECK (
+    (
+      auth.uid() = user_id 
+      OR (customer_email IS NOT NULL AND lower(customer_email) = lower(coalesce(auth.jwt()->>'email', '')))
+    )
+    AND fulfillment_status = 'CANCELLED'
+  );
 
 CREATE POLICY "orders_delete_admin"
   ON public.orders FOR DELETE
@@ -735,5 +753,236 @@ VALUES
 ('rev-201', 'prod-essential-bifold', 'Aarav Singhania', 'AS', 5, 'Flawless Buttero leather quality', 'The texture of the Conceria Walpier Buttero leather is velvety yet remarkably sturdy. Compact profile with zero unnecessary bulk.', 'Jan 08, 2025', true),
 ('rev-301', 'prod-slim-cardholder', 'Julian Thorne', 'JT', 5, 'The definitive minimalist card sleeve', 'Comfortably holds 5 cards and folded bills. English bridle leather feels indestructible and slides effortlessly in jacket pockets.', 'Jan 22, 2025', true)
 ON CONFLICT (id) DO NOTHING;
+
+-- ==============================================================================
+-- 16. ORDERS FULFILLMENT STATUS CONSTRAINT AUDIT (PROCESSING, CRAFTING, SHIPPED, DELIVERED, CANCELLED)
+-- ==============================================================================
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'orders') THEN
+    -- Drop legacy check constraints on fulfillment_status if present
+    ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_fulfillment_status_check;
+    -- Re-add standardized check constraint permitting CANCELLED
+    ALTER TABLE public.orders ADD CONSTRAINT orders_fulfillment_status_check
+      CHECK (fulfillment_status IN ('PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED'));
+  END IF;
+END $$;
+
+-- ==============================================================================
+-- 17. RETURN REQUESTS TABLE (Strict 7-Day Customer Returns & Unboxing Evidence)
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS public.return_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  return_request_id TEXT UNIQUE NOT NULL, -- e.g. 'RET-SB-1024'
+  order_id TEXT NOT NULL REFERENCES public.orders(id) ON DELETE CASCADE,
+  order_item_id UUID REFERENCES public.order_items(id) ON DELETE SET NULL,
+  customer_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  customer_name TEXT NOT NULL,
+  customer_email TEXT NOT NULL,
+  customer_phone TEXT,
+  product_id TEXT REFERENCES public.products(id) ON DELETE SET NULL,
+  product_name TEXT NOT NULL,
+  product_image TEXT,
+  product_sku TEXT,
+  quantity INTEGER NOT NULL DEFAULT 1,
+  item_price NUMERIC(10, 2) NOT NULL DEFAULT 0,
+  paid_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL CHECK (reason IN ('WRONG_PRODUCT', 'DEFECTIVE_PRODUCT', 'MISSING_PRODUCT_PART')),
+  description TEXT NOT NULL,
+  evidence_email_confirmed BOOLEAN NOT NULL DEFAULT true,
+  status TEXT NOT NULL DEFAULT 'RETURN_REQUESTED' CHECK (status IN (
+    'RETURN_REQUESTED',
+    'RETURN_APPROVED',
+    'RETURN_REJECTED',
+    'PICKUP_SCHEDULED',
+    'PICKED_UP',
+    'IN_TRANSIT',
+    'RETURN_RECEIVED',
+    'INSPECTION_COMPLETED',
+    'REFUND_INITIATED',
+    'REFUNDED',
+    'RETURN_COMPLETED'
+  )),
+  delivery_at_submission TIMESTAMPTZ NOT NULL,
+  return_deadline TIMESTAMPTZ NOT NULL,
+  requested_at TIMESTAMPTZ DEFAULT NOW(),
+  approved_at TIMESTAMPTZ,
+  approved_by TEXT,
+  rejected_at TIMESTAMPTZ,
+  rejected_by TEXT,
+  rejection_reason TEXT,
+  courier_name TEXT,
+  tracking_number TEXT,
+  pickup_notes TEXT,
+  pickup_scheduled_at TIMESTAMPTZ,
+  picked_up_at TIMESTAMPTZ,
+  in_transit_at TIMESTAMPTZ,
+  received_at TIMESTAMPTZ,
+  inspection_result TEXT DEFAULT 'PENDING' CHECK (inspection_result IN ('PENDING', 'PASSED', 'FAILED')),
+  inspection_notes TEXT,
+  inspection_at TIMESTAMPTZ,
+  inspected_by TEXT,
+  refund_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+  refund_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (refund_status IN ('NOT_APPLICABLE', 'PENDING', 'INITIATED', 'COMPLETED', 'FAILED')),
+  refund_reference TEXT,
+  refund_failure_reason TEXT,
+  refund_initiated_at TIMESTAMPTZ,
+  refunded_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  admin_notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_return_requests_order_id ON public.return_requests(order_id);
+CREATE INDEX IF NOT EXISTS idx_return_requests_customer_id ON public.return_requests(customer_id);
+CREATE INDEX IF NOT EXISTS idx_return_requests_customer_email ON public.return_requests(customer_email);
+CREATE INDEX IF NOT EXISTS idx_return_requests_status ON public.return_requests(status);
+CREATE INDEX IF NOT EXISTS idx_return_requests_created_at ON public.return_requests(created_at DESC);
+
+-- Partial index to prevent duplicate active/pending return requests for the same order item
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_return_per_item 
+  ON public.return_requests(order_id, order_item_id) 
+  WHERE status != 'RETURN_REJECTED' AND order_item_id IS NOT NULL;
+
+-- ==============================================================================
+-- 18. RETURN STATUS AUDIT TRAIL TABLE
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS public.return_status_history (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  return_request_id TEXT NOT NULL REFERENCES public.return_requests(return_request_id) ON DELETE CASCADE,
+  old_status TEXT,
+  new_status TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  changed_by_role TEXT NOT NULL DEFAULT 'CUSTOMER' CHECK (changed_by_role IN ('CUSTOMER', 'ADMIN', 'SYSTEM')),
+  note TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_return_status_history_req_id ON public.return_status_history(return_request_id);
+
+-- ==============================================================================
+-- 19. RLS POLICIES FOR RETURN REQUESTS & AUDIT HISTORY
+-- ==============================================================================
+ALTER TABLE public.return_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.return_status_history ENABLE ROW LEVEL SECURITY;
+
+-- Customers can view only their own returns
+DROP POLICY IF EXISTS "return_requests_select_customer" ON public.return_requests;
+CREATE POLICY "return_requests_select_customer" ON public.return_requests
+  FOR SELECT TO authenticated
+  USING (
+    auth.uid() = customer_id 
+    OR lower(customer_email) = lower(coalesce(auth.jwt()->>'email', ''))
+    OR public.is_admin()
+  );
+
+-- Customers can create their own return requests
+DROP POLICY IF EXISTS "return_requests_insert_customer" ON public.return_requests;
+CREATE POLICY "return_requests_insert_customer" ON public.return_requests
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    auth.uid() = customer_id 
+    OR lower(customer_email) = lower(coalesce(auth.jwt()->>'email', ''))
+    OR public.is_admin()
+  );
+
+-- Administrators have full management rights (Select, Insert, Update, Delete)
+DROP POLICY IF EXISTS "return_requests_all_admin" ON public.return_requests;
+CREATE POLICY "return_requests_all_admin" ON public.return_requests
+  FOR ALL TO authenticated
+  USING (public.is_admin())
+  WITH CHECK (public.is_admin());
+
+-- Return audit history policies
+DROP POLICY IF EXISTS "return_history_select_customer" ON public.return_status_history;
+CREATE POLICY "return_history_select_customer" ON public.return_status_history
+  FOR SELECT TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.return_requests r
+      WHERE r.return_request_id = return_status_history.return_request_id
+      AND (r.customer_id = auth.uid() OR lower(r.customer_email) = lower(coalesce(auth.jwt()->>'email', '')))
+    )
+    OR public.is_admin()
+  );
+
+DROP POLICY IF EXISTS "return_history_all_admin" ON public.return_status_history;
+CREATE POLICY "return_history_all_admin" ON public.return_status_history
+  FOR ALL TO authenticated
+  USING (public.is_admin())
+  WITH CHECK (public.is_admin());
+
+-- ==============================================================================
+-- RETURN REQUESTS INITIAL STATUS HISTORY DATABASE TRIGGER
+-- Guarantees the initial 'RETURN_REQUESTED' audit log is created automatically
+-- with SECURITY DEFINER privileges without weakening RLS policies.
+-- ==============================================================================
+
+CREATE OR REPLACE FUNCTION public.fn_on_return_request_created()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  -- Insert initial RETURN_REQUESTED history event if not already present
+  IF NOT EXISTS (
+    SELECT 1 FROM public.return_status_history
+    WHERE return_request_id = NEW.return_request_id
+    AND new_status = 'RETURN_REQUESTED'
+  ) THEN
+    INSERT INTO public.return_status_history (
+      return_request_id,
+      old_status,
+      new_status,
+      changed_by,
+      changed_by_role,
+      note,
+      created_at
+    ) VALUES (
+      NEW.return_request_id,
+      NULL,
+      'RETURN_REQUESTED',
+      COALESCE(NEW.customer_email, 'CUSTOMER'),
+      'CUSTOMER',
+      COALESCE('Return request submitted with reason: ' || NEW.reason || '. Patron confirmed unboxing video email submission.', 'Initial return request created.'),
+      COALESCE(NEW.requested_at, NEW.created_at, NOW())
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_return_request_created ON public.return_requests;
+CREATE TRIGGER trg_return_request_created
+  AFTER INSERT ON public.return_requests
+  FOR EACH ROW
+  EXECUTE FUNCTION public.fn_on_return_request_created();
+
+-- Optional one-time idempotent backfill for existing return requests lacking history
+INSERT INTO public.return_status_history (
+  return_request_id,
+  old_status,
+  new_status,
+  changed_by,
+  changed_by_role,
+  note,
+  created_at
+)
+SELECT 
+  r.return_request_id,
+  NULL,
+  'RETURN_REQUESTED',
+  COALESCE(r.customer_email, 'CUSTOMER'),
+  'CUSTOMER',
+  COALESCE('Return request submitted with reason: ' || r.reason || '. Patron confirmed unboxing video email submission.', 'Initial return request created.'),
+  COALESCE(r.requested_at, r.created_at, NOW())
+FROM public.return_requests r
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.return_status_history h
+  WHERE h.return_request_id = r.return_request_id
+);
+
 
 

@@ -243,6 +243,8 @@ export const HomeScreen: React.FC = () => {
                         src={prod.images?.[0] || 'https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=800&q=80'}
                         alt={`${prod.name} - Handcrafted full-grain ${prod.category || 'leather'} in ${prod.colorName || 'Artisan Patina'}`}
                         referrerPolicy="no-referrer"
+                        loading="lazy"
+                        decoding="async"
                         className="w-full h-full object-cover object-center group-hover:scale-108 transition-transform duration-700 ease-out"
                       />
                     </div>
@@ -333,6 +335,8 @@ export const HomeScreen: React.FC = () => {
                         src={prod.images?.[0] || 'https://images.unsplash.com/photo-1584917865442-de89df76afd3?auto=format&fit=crop&w=800&q=80'}
                         alt={`${prod.name} - Handcrafted atelier piece in ${prod.colorName || 'Artisan Patina'}`}
                         referrerPolicy="no-referrer"
+                        loading="lazy"
+                        decoding="async"
                         className="w-full h-full object-cover object-center group-hover:scale-108 transition-transform duration-700 ease-out"
                       />
                     </div>
@@ -388,6 +392,8 @@ export const HomeScreen: React.FC = () => {
                 src={tacticalWalletMaterialsImg}
                 alt="Technical Ripstop Wallet Material and Construction Detail"
                 referrerPolicy="no-referrer"
+                loading="lazy"
+                decoding="async"
                 className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-700"
               />
               <div className="absolute bottom-3 right-3 bg-black/75 backdrop-blur-xs text-[#faf8f5] text-[10px] uppercase tracking-widest px-3 py-1.5 font-medium shadow-sm">
@@ -477,6 +483,8 @@ export const HomeScreen: React.FC = () => {
                   src={artisanSaddleStitchImg}
                   alt="Master artisan hand saddle stitching leather at Stunning Birds Atelier"
                   referrerPolicy="no-referrer"
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-700 ease-out"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent pointer-events-none" />
@@ -504,6 +512,8 @@ export const HomeScreen: React.FC = () => {
                   src={beveledLeatherWalletImg}
                   alt="Handcrafted leather wallet with hand beveled edges on walnut wood"
                   referrerPolicy="no-referrer"
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-700 ease-out"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent pointer-events-none" />
@@ -531,6 +541,8 @@ export const HomeScreen: React.FC = () => {
                   src={darkVelvetWalletImg}
                   alt="Luxury dark velvet textured wallet with organic beeswax burnished edges"
                   referrerPolicy="no-referrer"
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-700 ease-out"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent pointer-events-none" />

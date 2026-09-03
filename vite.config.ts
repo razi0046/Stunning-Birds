@@ -12,13 +12,25 @@ export default defineConfig(() => {
       },
     },
     build: {
-      chunkSizeWarningLimit: 2500,
+      chunkSizeWarningLimit: 1500,
       rollupOptions: {
         output: {
-          manualChunks: {
-            vendor: ['react', 'react-dom'],
-            pdf: ['jspdf', 'jspdf-autotable', 'html2canvas'],
-            icons: ['lucide-react'],
+          manualChunks(id) {
+            if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) {
+              return 'vendor-react';
+            }
+            if (id.includes('node_modules/@supabase/')) {
+              return 'vendor-supabase';
+            }
+            if (id.includes('node_modules/lucide-react/')) {
+              return 'vendor-icons';
+            }
+            if (id.includes('node_modules/jspdf') || id.includes('node_modules/html2canvas') || id.includes('node_modules/jspdf-autotable')) {
+              return 'vendor-pdf';
+            }
+            if (id.includes('node_modules/xlsx')) {
+              return 'vendor-xlsx';
+            }
           },
         },
       },

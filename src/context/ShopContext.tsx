@@ -1,10 +1,10 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Product, CartItem, Order, UserProfile, AdminMetrics, FoilColor, ShippingLabel, ProductReview, TimelineStep, FulfillmentStatus } from '../types';
 import { INITIAL_PRODUCTS, INITIAL_ORDERS, CURRENT_USER, ADMIN_METRICS } from '../data/mockData';
 import { generateShippingLabelData } from '../utils/shippingLabelGenerator';
+import { exportOrdersToDelhiveryExcel } from '../utils/delhiveryExcelExport';
 import { supabase } from '../supabaseClient';
-import { 
-  uploadProductImagesList, 
+import { uploadProductImagesList, 
   deleteProductImagesFromStorage, 
   deleteProductFolderFromStorage 
 } from '../utils/supabaseStorage';
@@ -65,13 +65,20 @@ interface ShopContextType {
   ) => Promise<Order | null>;
   markOrderPaymentFailed?: (orderId: string, reason?: string) => Promise<void>;
   updateOrderStatus: (orderId: string, fulfillmentStatus?: string, paymentStatus?: string) => Promise<void>;
+  bulkUpdateOrderStatus: (
+    orderIds: string[],
+    fulfillmentStatus: FulfillmentStatus
+  ) => Promise<{ success: boolean; updatedCount: number; failedCount: number; message: string; failedOrders?: Array<{ id: string; reason: string }> }>;
   updateOrderShippingLabel: (orderId: string, label: ShippingLabel) => void;
   regenerateShippingLabel: (orderId: string) => Promise<ShippingLabel>;
   deleteOrder: (orderId: string) => Promise<boolean>;
+  cancelCustomerOrder: (orderId: string, reason?: string, note?: string) => Promise<{ success: boolean; message?: string; order?: Order }>;
+  markOrderAsRefunded: (orderId: string) => Promise<{ success: boolean; message?: string; order?: Order }>;
   addNewProduct: (productData: Partial<Product>) => Promise<void>;
   updateProduct: (productId: string, updatedFields: Partial<Product>) => Promise<void>;
   deleteProduct: (productId: string) => Promise<boolean>;
-  exportOrdersCSV: () => void;
+  exportOrdersCSV: (targetOrders?: Order[]) => void;
+  exportDelhiveryExcel?: (targetOrders?: Order[]) => void;
   exportProductsCSV: () => void;
   refetchOrders: () => Promise<void>;
   userProfile: UserProfile;
@@ -101,7 +108,28 @@ interface ShopContextType {
   login: (email: string, password?: string, customName?: string) => Promise<boolean>;
   register: (name: string, email: string, password?: string) => Promise<boolean>;
   logout: () => void;
+  getProductVariants: (product: Product) => Product[];
 }
+
+interface StoredVariantLink {
+  variantGroup?: string;
+  linkedVariantIds: string[];
+}
+
+export const getStoredVariantLinksMap = (): Record<string, StoredVariantLink> => {
+  try {
+    const raw = localStorage.getItem('sb_product_variant_links');
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
+export const saveStoredVariantLinksMap = (map: Record<string, StoredVariantLink>) => {
+  try {
+    localStorage.setItem('sb_product_variant_links', JSON.stringify(map));
+  } catch {}
+};
 
 // Helper: map Supabase product record to frontend Product interface
 const mapSupabaseProduct = (p: any): Product => {
@@ -111,6 +139,17 @@ const mapSupabaseProduct = (p: any): Product => {
   const mrpPrice = p.mrp !== undefined && p.mrp !== null 
     ? Number(p.mrp) 
     : (p.original_price !== undefined && p.original_price !== null ? Number(p.original_price) : undefined);
+
+  const storedLinksMap = getStoredVariantLinksMap();
+  const storedLink = storedLinksMap[p.id] || storedLinksMap[p.slug];
+  const initialMatch = INITIAL_PRODUCTS.find(ip => ip.id === p.id || ip.slug === p.slug);
+
+  const variantGroup = p.variant_group || p.variantGroup || storedLink?.variantGroup || initialMatch?.variantGroup || undefined;
+  const linkedVariantIds = Array.isArray(p.linked_variant_ids)
+    ? p.linked_variant_ids
+    : (Array.isArray(p.linkedVariantIds)
+      ? p.linkedVariantIds
+      : (storedLink?.linkedVariantIds || initialMatch?.linkedVariantIds || undefined));
 
   return {
     id: p.id,
@@ -143,6 +182,8 @@ const mapSupabaseProduct = (p: any): Product => {
     featured: Boolean(p.featured),
     isNewArrival: Boolean(p.is_new_arrival),
     productHighlights: Array.isArray(p.product_highlights) ? p.product_highlights : [],
+    variantGroup,
+    linkedVariantIds,
     reviews: Array.isArray(p.product_reviews) ? p.product_reviews.map((r: any) => ({
       id: r.id,
       productId: r.product_id,
@@ -158,11 +199,30 @@ const mapSupabaseProduct = (p: any): Product => {
   };
 };
 
-export const generateTimelineFromStatus = (status: string = 'CRAFTING', orderDate?: string, awb?: string): TimelineStep[] => {
-  const normStatus = (status || 'CRAFTING').toUpperCase();
+export const generateTimelineFromStatus = (status: string = 'PROCESSING', orderDate?: string, awb?: string): TimelineStep[] => {
+  const normStatus = (status || 'PROCESSING').toUpperCase();
   
-  let step = 1; // 0: Processing/Placed, 1: Crafting, 2: Shipped, 3: Delivered
-  if (normStatus === 'PROCESSING' || normStatus === 'PENDING' || normStatus === 'CONFIRMED') {
+  if (normStatus === 'CANCELLED') {
+    return [
+      {
+        key: 'placed',
+        title: 'ORDER PLACED',
+        subtitle: orderDate || 'Order Received',
+        completed: true,
+        current: false,
+      },
+      {
+        key: 'cancelled',
+        title: 'ORDER CANCELLED',
+        subtitle: 'Cancelled at Patron Request',
+        completed: true,
+        current: true,
+      },
+    ];
+  }
+
+  let step = 0; // 0: Processing, 1: Crafting, 2: Shipped, 3: Delivered
+  if (normStatus === 'PROCESSING') {
     step = 0;
   } else if (normStatus === 'CRAFTING') {
     step = 1;
@@ -206,7 +266,7 @@ export const generateTimelineFromStatus = (status: string = 'CRAFTING', orderDat
 
 // Helper: map Supabase order record to frontend Order interface
 const mapSupabaseOrder = (o: any): Order => {
-  const rawStatus = (o.fulfillment_status || o.fulfillmentStatus || 'CRAFTING').toUpperCase();
+  const rawStatus = (o.fulfillment_status || o.fulfillmentStatus || 'PROCESSING').toUpperCase();
   const dateStr = o.order_date || (o.created_at ? new Date(o.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : new Date().toLocaleDateString('en-US'));
   const parsedLabel = typeof o.shipping_label === 'string' ? JSON.parse(o.shipping_label) : (o.shipping_label || undefined);
   const awbNumber = parsedLabel?.awbNumber || undefined;
@@ -241,7 +301,7 @@ const mapSupabaseOrder = (o: any): Order => {
       addressLine: '',
     }),
     shippingMethod: o.shipping_method || 'Complimentary Express Courier (3-5 Business Days)',
-    timeline: generateTimelineFromStatus(rawStatus, dateStr, awbNumber),
+    timeline: Array.isArray(o.timeline) && o.timeline.length > 0 ? o.timeline : generateTimelineFromStatus(rawStatus, dateStr, awbNumber),
     shippingLabel: parsedLabel,
     items: Array.isArray(o.order_items) && o.order_items.length > 0 ? o.order_items.map((it: any) => ({
       productId: it.product_id,
@@ -362,7 +422,10 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   // 1. Fetch Products directly from Supabase (or fallback to backend API / INITIAL_PRODUCTS)
+  const isFetchingProductsRef = useRef(false);
   const fetchProducts = useCallback(async () => {
+    if (isFetchingProductsRef.current) return;
+    isFetchingProductsRef.current = true;
     try {
       const { data, error } = await supabase
         .from('products')
@@ -379,6 +442,8 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     } catch (err) {
       console.error('Exception fetching products from Supabase:', err);
+    } finally {
+      isFetchingProductsRef.current = false;
     }
 
     try {
@@ -393,34 +458,21 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  // 2. Fetch User Profile, Saved Addresses, Wishlist and Cart from Supabase
+  // 2. Fetch User Profile, Saved Addresses, Wishlist and Cart from Supabase concurrently
   const fetchUserData = useCallback(async (userId: string, userEmail: string, metaName?: string) => {
     try {
-      // A. Profile
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .maybeSingle();
-
-      // B. Addresses
-      const { data: addresses } = await supabase
-        .from('user_addresses')
-        .select('*')
-        .eq('user_id', userId)
-        .order('is_default', { ascending: false });
-
-      // C. Wishlist items (with products relationship)
-      const { data: wishlists } = await supabase
-        .from('wishlist_items')
-        .select('product_id, products(*)')
-        .eq('user_id', userId);
-
-      // D. Cart items (with products relationship)
-      const { data: cartData } = await supabase
-        .from('cart_items')
-        .select('*, products(*)')
-        .eq('user_id', userId);
+      // Parallelize Supabase data fetches to reduce initial round-trip latency by 75%
+      const [
+        { data: profile },
+        { data: addresses },
+        { data: wishlists },
+        { data: cartData }
+      ] = await Promise.all([
+        supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
+        supabase.from('user_addresses').select('*').eq('user_id', userId).order('is_default', { ascending: false }),
+        supabase.from('wishlist_items').select('product_id, products(*)').eq('user_id', userId),
+        supabase.from('cart_items').select('*, products(*)').eq('user_id', userId),
+      ]);
 
       const resolvedName = profile?.full_name || metaName || userEmail.split('@')[0];
       const initials = resolvedName
@@ -630,33 +682,30 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Synchronize session on mount, subscribe to auth changes, and listen for live order updates
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        const userEmail = session.user.email || '';
-        const userName = session.user.user_metadata?.full_name || userEmail.split('@')[0];
-        setIsLoggedIn(true);
-        fetchUserData(session.user.id, userEmail, userName);
-        fetchOrders(session.user.id, userEmail, false);
-      } else {
-        setIsLoggedIn(false);
-        setCart([]);
-        setOrders([]);
-      }
-    });
+    let lastHandledUserId: string | null = undefined as any;
 
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const handleAuthSession = (session: any) => {
       if (session?.user) {
+        if (lastHandledUserId === session.user.id) return;
+        lastHandledUserId = session.user.id;
         const userEmail = session.user.email || '';
         const userName = session.user.user_metadata?.full_name || userEmail.split('@')[0];
         setIsLoggedIn(true);
         fetchUserData(session.user.id, userEmail, userName);
         fetchOrders(session.user.id, userEmail, false);
       } else {
+        if (lastHandledUserId === null) return;
+        lastHandledUserId = null;
         setIsLoggedIn(false);
         setCart([]);
         setOrders([]);
         setUserProfile(CURRENT_USER);
       }
+    };
+
+    // onAuthStateChange fires with INITIAL_SESSION on initial load, deduplicating the getSession call
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      handleAuthSession(session);
     });
 
     // Debounced realtime handler to prevent rapid duplicate refetches
@@ -664,7 +713,7 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (refetchTimeoutRef.current) clearTimeout(refetchTimeoutRef.current);
       refetchTimeoutRef.current = setTimeout(() => {
         refetchOrders();
-      }, 400);
+      }, 500);
     };
 
     // Realtime postgres changes on orders table for instant live sync across client and admin
@@ -677,8 +726,13 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       )
       .subscribe();
 
-    // Window focus / visibility sync: immediately re-fetch orders so stale state is never shown
+    // Window focus / visibility sync: throttled so rapid tab switching does not spam Supabase
+    let lastFocusFetchTime = 0;
     const handleWindowFocus = () => {
+      if (document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastFocusFetchTime < 30000) return; // 30s throttle
+      lastFocusFetchTime = now;
       triggerDebouncedRefetch();
     };
     window.addEventListener('focus', handleWindowFocus);
@@ -1459,6 +1513,90 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     showToast(`Order ${orderId} status updated in database`);
   };
 
+  const bulkUpdateOrderStatus = async (
+    orderIds: string[],
+    fulfillmentStatus: FulfillmentStatus
+  ): Promise<{ success: boolean; updatedCount: number; failedCount: number; message: string; failedOrders?: Array<{ id: string; reason: string }> }> => {
+    if (!orderIds || orderIds.length === 0) {
+      const msg = 'No orders selected for bulk status update.';
+      showToast(msg);
+      return { success: false, updatedCount: 0, failedCount: 0, message: msg };
+    }
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      // 1. Call secure server endpoint to validate admin authorization and apply updates atomically
+      const response = await fetch('/api/admin/orders/bulk-status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          orderIds,
+          fulfillmentStatus,
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (response.ok && data.success) {
+        const updatedIds: string[] = data.updatedOrderIds || orderIds;
+        // 2. Synchronize local orders state in React
+        setOrders(prev => prev.map(o => {
+          const isTarget = updatedIds.some(id => id === o.id || id.replace(/^#/, '') === o.id.replace(/^#/, ''));
+          if (isTarget) {
+            return {
+              ...o,
+              fulfillmentStatus,
+              timeline: generateTimelineFromStatus(fulfillmentStatus, o.date, o.shippingLabel?.awbNumber),
+            };
+          }
+          return o;
+        }));
+
+        // 3. Trigger immediate refetch to sync any real-time DB changes
+        try {
+          await refetchOrders();
+        } catch (rErr) {
+          console.warn('Orders refetch notice:', rErr);
+        }
+
+        const msg = data.message || `${data.updatedCount || updatedIds.length} orders updated to ${fulfillmentStatus}`;
+        showToast(msg);
+        return {
+          success: true,
+          updatedCount: data.updatedCount || updatedIds.length,
+          failedCount: data.failedCount || 0,
+          message: msg,
+          failedOrders: data.failedOrders,
+        };
+      } else {
+        const errorMsg = data.error || data.message || 'Failed to update order status';
+        showToast(errorMsg);
+        return {
+          success: false,
+          updatedCount: data.updatedCount || 0,
+          failedCount: data.failedCount || orderIds.length,
+          message: errorMsg,
+          failedOrders: data.failedOrders,
+        };
+      }
+    } catch (err: any) {
+      console.error('Error during bulk order status update:', err);
+      const errMsg = `Error updating orders: ${err?.message || 'Unknown network error'}`;
+      showToast(errMsg);
+      return {
+        success: false,
+        updatedCount: 0,
+        failedCount: orderIds.length,
+        message: errMsg,
+      };
+    }
+  };
+
   const deleteOrder = async (orderId: string): Promise<boolean> => {
     // 1. Verify authenticated admin session
     const { data: { session } } = await supabase.auth.getSession();
@@ -1577,6 +1715,135 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.error('Unexpected exception during Supabase order deletion:', err);
       showToast(`Error deleting order: ${err?.message || 'Unknown database error'}`);
       return false;
+    }
+  };
+
+  const cancelCustomerOrder = async (orderId: string, reason?: string, note?: string): Promise<{ success: boolean; message?: string; order?: Order }> => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      // 1. Call secure backend endpoint to enforce server-side validation & atomic DB update
+      const response = await fetch(`/api/orders/${encodeURIComponent(orderId)}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ 
+          reason: reason || 'Cancelled by Patron',
+          note: note || undefined,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        const errorMsg = data.error || data.message || 'Unable to cancel order.';
+        showToast(errorMsg);
+        return { success: false, message: errorMsg };
+      }
+
+      // 2. Synchronize frontend React state with the updated cancelled order
+      const returnedOrder = data.order;
+      setOrders(prev => prev.map(o => {
+        if (o.id === orderId || o.id.replace(/^#/, '') === orderId.replace(/^#/, '')) {
+          if (returnedOrder) {
+            return {
+              ...o,
+              fulfillmentStatus: 'CANCELLED',
+              timeline: returnedOrder.timeline && returnedOrder.timeline.length > 0 
+                ? returnedOrder.timeline 
+                : generateTimelineFromStatus('CANCELLED', o.date, o.shippingLabel?.awbNumber),
+            };
+          }
+          return {
+            ...o,
+            fulfillmentStatus: 'CANCELLED',
+            timeline: generateTimelineFromStatus('CANCELLED', o.date, o.shippingLabel?.awbNumber),
+          };
+        }
+        return o;
+      }));
+
+      if (latestPlacedOrder && (latestPlacedOrder.id === orderId || latestPlacedOrder.id.replace(/^#/, '') === orderId.replace(/^#/, ''))) {
+        setLatestPlacedOrder(prev => prev ? {
+          ...prev,
+          fulfillmentStatus: 'CANCELLED',
+          timeline: returnedOrder?.timeline && returnedOrder.timeline.length > 0
+            ? returnedOrder.timeline
+            : generateTimelineFromStatus('CANCELLED', prev.date, prev.shippingLabel?.awbNumber),
+        } : null);
+      }
+
+      showToast(`Order ${orderId} has been successfully cancelled.`);
+      refetchOrders();
+      return { success: true, message: data.message, order: returnedOrder };
+    } catch (err: any) {
+      console.error('Order cancellation error:', err);
+      const errMsg = err?.message || 'An unexpected error occurred during cancellation.';
+      showToast(errMsg);
+      return { success: false, message: errMsg };
+    }
+  };
+
+  const markOrderAsRefunded = async (orderId: string): Promise<{ success: boolean; message?: string; order?: Order }> => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      if (!token) {
+        const authErr = 'Authentication Required: Please sign in as an administrator to mark orders as refunded.';
+        showToast(authErr);
+        return { success: false, message: authErr };
+      }
+
+      // 1. Call secure backend endpoint to enforce server-side validation & persistence
+      const response = await fetch(`/api/orders/${encodeURIComponent(orderId)}/mark-refunded`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        const errorMsg = data.error || data.message || 'Unable to mark order as refunded.';
+        showToast(errorMsg);
+        return { success: false, message: errorMsg };
+      }
+
+      // 2. Synchronize frontend React state with the updated refunded order
+      const returnedOrder = data.order;
+      setOrders(prev => prev.map(o => {
+        if (o.id === orderId || o.id.replace(/^#/, '') === orderId.replace(/^#/, '')) {
+          return {
+            ...o,
+            paymentStatus: 'Refunded',
+            ...(returnedOrder ? returnedOrder : {}),
+          };
+        }
+        return o;
+      }));
+
+      if (latestPlacedOrder && (latestPlacedOrder.id === orderId || latestPlacedOrder.id.replace(/^#/, '') === orderId.replace(/^#/, ''))) {
+        setLatestPlacedOrder(prev => prev ? {
+          ...prev,
+          paymentStatus: 'Refunded',
+          ...(returnedOrder ? returnedOrder : {}),
+        } : null);
+      }
+
+      showToast(`Order ${orderId} marked as Refunded successfully.`);
+      refetchOrders();
+      return { success: true, message: data.message, order: returnedOrder };
+    } catch (err: any) {
+      console.error('Mark order refunded error:', err);
+      const errMsg = err?.message || 'An unexpected error occurred while updating refund status.';
+      showToast(errMsg);
+      return { success: false, message: errMsg };
     }
   };
 
@@ -1702,7 +1969,36 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     } catch {}
 
-    setProducts([newProd, ...products]);
+    if (productData.linkedVariantIds && productData.linkedVariantIds.length > 0) {
+      const storedMap = getStoredVariantLinksMap();
+      const allCluster = Array.from(new Set([newProd.id, ...productData.linkedVariantIds]));
+      allCluster.forEach(memberId => {
+        const others = allCluster.filter(oid => oid !== memberId);
+        storedMap[memberId] = {
+          variantGroup: productData.variantGroup || storedMap[memberId]?.variantGroup || '',
+          linkedVariantIds: others,
+        };
+      });
+      saveStoredVariantLinksMap(storedMap);
+
+      const finalMap = getStoredVariantLinksMap();
+      setProducts(prev => [
+        { ...newProd, variantGroup: productData.variantGroup, linkedVariantIds: productData.linkedVariantIds },
+        ...prev.map(p => {
+          if (finalMap[p.id]) {
+            return {
+              ...p,
+              variantGroup: finalMap[p.id].variantGroup || p.variantGroup,
+              linkedVariantIds: finalMap[p.id].linkedVariantIds,
+            };
+          }
+          return p;
+        }),
+      ]);
+    } else {
+      setProducts([newProd, ...products]);
+    }
+
     showToast(`Created new product: ${newProd.name} with Supabase Storage images`);
   };
 
@@ -1800,13 +2096,52 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     } catch {}
 
+    // Synchronize colour variant links bidirectionally while preserving each variant's fields independently
+    if (updatedFields.variantGroup !== undefined || updatedFields.linkedVariantIds !== undefined) {
+      const storedMap = getStoredVariantLinksMap();
+      const currentLinked = updatedFields.linkedVariantIds !== undefined 
+        ? updatedFields.linkedVariantIds 
+        : (targetProd?.linkedVariantIds || []);
+      const newGroup = updatedFields.variantGroup !== undefined 
+        ? updatedFields.variantGroup 
+        : (targetProd?.variantGroup || '');
+      const allCluster = Array.from(new Set([resolvedId, ...currentLinked]));
+
+      if (currentLinked.length > 0) {
+        allCluster.forEach(memberId => {
+          const others = allCluster.filter(oid => oid !== memberId);
+          storedMap[memberId] = {
+            variantGroup: newGroup || storedMap[memberId]?.variantGroup || '',
+            linkedVariantIds: others,
+          };
+        });
+      } else {
+        const oldLinked = targetProd?.linkedVariantIds || [];
+        oldLinked.forEach(oldId => {
+          if (storedMap[oldId]) {
+            storedMap[oldId].linkedVariantIds = storedMap[oldId].linkedVariantIds.filter(id => id !== resolvedId);
+          }
+        });
+        storedMap[resolvedId] = {
+          variantGroup: newGroup,
+          linkedVariantIds: [],
+        };
+      }
+      saveStoredVariantLinksMap(storedMap);
+    }
+
+    const finalStoredLinks = getStoredVariantLinksMap();
+
     setProducts(prev => prev.map(p => {
       if (p.id === productId || p.slug === productId || p.id === resolvedId) {
         const nextPrice = resolvedPrice !== undefined ? resolvedPrice : p.price;
         const nextMrp = resolvedMrp !== undefined ? (resolvedMrp === null ? undefined : resolvedMrp) : p.originalPrice;
+        const targetLink = finalStoredLinks[p.id];
         const updated: Product = {
           ...p,
           ...updatedFields,
+          variantGroup: updatedFields.variantGroup !== undefined ? updatedFields.variantGroup : (targetLink?.variantGroup ?? p.variantGroup),
+          linkedVariantIds: updatedFields.linkedVariantIds !== undefined ? updatedFields.linkedVariantIds : (targetLink?.linkedVariantIds ?? p.linkedVariantIds),
           price: nextPrice,
           sellingPrice: nextPrice,
           selling_price: nextPrice,
@@ -1822,9 +2157,19 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         return updated;
       }
+
+      // If p is one of the linked or unlinked variants, update only its variant link references
+      if (finalStoredLinks[p.id]) {
+        return {
+          ...p,
+          variantGroup: finalStoredLinks[p.id].variantGroup !== undefined ? finalStoredLinks[p.id].variantGroup : p.variantGroup,
+          linkedVariantIds: finalStoredLinks[p.id].linkedVariantIds,
+        };
+      }
+
       return p;
     }));
-    showToast(`Updated product and synced images in Supabase`);
+    showToast(`Updated product and synced variants`);
   };
 
   const deleteProduct = async (productId: string): Promise<boolean> => {
@@ -1936,36 +2281,24 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const exportOrdersCSV = () => {
-    if (!orders || orders.length === 0) {
+  const exportOrdersCSV = async (targetOrders?: Order[]) => {
+    const candidateOrders = (targetOrders && targetOrders.length > 0) ? targetOrders : orders;
+    if (!candidateOrders || candidateOrders.length === 0) {
       showToast('No orders available to export');
       return;
     }
 
-    const headers = ['Order ID', 'Date', 'Customer Name', 'Customer Email', 'Items & SKU', 'Subtotal (INR)', 'Taxes (INR)', 'Total (INR)', 'Payment Status', 'Fulfillment Status'];
-    const rows = orders.map(o => [
-      o.id,
-      `"${o.date}"`,
-      `"${o.customer.name.replace(/"/g, '""')}"`,
-      `"${o.customer.email.replace(/"/g, '""')}"`,
-      `"${o.items.map(i => `${i.productName} [SKU: ${i.sku || i.skuId || 'N/A'}] (x${i.quantity})`).join('; ').replace(/"/g, '""')}"`,
-      o.subtotal,
-      o.taxes,
-      o.total,
-      o.paymentStatus,
-      o.fulfillmentStatus,
-    ]);
-
-    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', `stunning_birds_orders_${new Date().toISOString().split('T')[0]}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    showToast('Orders exported to CSV successfully');
+    try {
+      const success = await exportOrdersToDelhiveryExcel(candidateOrders, products);
+      if (success) {
+        showToast(`Exported ${candidateOrders.length} orders to Delhivery Excel (.xlsx)`);
+      } else {
+        showToast('No shipment rows generated for export');
+      }
+    } catch (err: any) {
+      console.error('Error generating Delhivery Excel manifest:', err);
+      showToast(`Export failed: ${err?.message || 'Unknown error'}`);
+    }
   };
 
   const exportProductsCSV = () => {
@@ -2109,69 +2442,148 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return true;
   };
 
+  const getProductVariants = useCallback((product: Product): Product[] => {
+    if (!product) return [];
+    const currentId = product.id;
+    const currentGroup = product.variantGroup?.trim().toLowerCase();
+    const currentLinked = product.linkedVariantIds || [];
+
+    const matched = products.filter(p => {
+      if (p.id === currentId) return true;
+      if (currentLinked.includes(p.id)) return true;
+      if (p.linkedVariantIds && p.linkedVariantIds.includes(currentId)) return true;
+      if (currentGroup && p.variantGroup && p.variantGroup.trim().toLowerCase() === currentGroup) return true;
+      return false;
+    });
+
+    if (!matched.some(p => p.id === currentId)) {
+      matched.unshift(product);
+    }
+
+    const map = new Map<string, Product>();
+    matched.forEach(p => map.set(p.id, p));
+    return Array.from(map.values());
+  }, [products]);
+
+  const contextValue = useMemo(() => ({
+    currentScreen,
+    setCurrentScreen,
+    products,
+    selectedProduct,
+    setSelectedProduct,
+    openProductBySlug,
+    cart,
+    addToCart,
+    removeFromCart,
+    updateCartQuantity,
+    cartCount,
+    cartTotal,
+    isCartOpen,
+    setIsCartOpen,
+    isSearchOpen,
+    setIsSearchOpen,
+    orders,
+    latestPlacedOrder,
+    placeOrder,
+    createVerifiedOrder,
+    createPendingOrder: createVerifiedOrder as any,
+    confirmOrderPayment: async () => null,
+    markOrderPaymentFailed: async () => {},
+    updateOrderStatus,
+    bulkUpdateOrderStatus,
+    updateOrderShippingLabel,
+    regenerateShippingLabel,
+    addNewProduct,
+    updateProduct,
+    deleteProduct,
+    deleteOrder,
+    cancelCustomerOrder,
+    markOrderAsRefunded,
+    exportOrdersCSV,
+    exportProductsCSV,
+    refetchOrders,
+    userProfile,
+    toggleWishlist,
+    addProductReview,
+    adminMetrics,
+    selectedCategoryFilter,
+    setSelectedCategoryFilter,
+    selectedColorFilter,
+    setSelectedColorFilter,
+    toastMessage,
+    showToast,
+    isPageLoading,
+    pageLoadingLabel,
+    triggerPageLoad,
+    setPageLoading,
+    isLoggedIn,
+    isAuthModalOpen,
+    setIsAuthModalOpen,
+    authModalMode,
+    setAuthModalMode,
+    authPromptMessage,
+    openAuthModal,
+    closeAuthModal,
+    login,
+    register,
+    logout,
+    getProductVariants,
+  }), [
+    currentScreen,
+    products,
+    selectedProduct,
+    cart,
+    cartCount,
+    cartTotal,
+    isCartOpen,
+    isSearchOpen,
+    orders,
+    latestPlacedOrder,
+    userProfile,
+    adminMetrics,
+    selectedCategoryFilter,
+    selectedColorFilter,
+    toastMessage,
+    isPageLoading,
+    pageLoadingLabel,
+    isLoggedIn,
+    isAuthModalOpen,
+    authModalMode,
+    authPromptMessage,
+    openProductBySlug,
+    addToCart,
+    removeFromCart,
+    updateCartQuantity,
+    placeOrder,
+    createVerifiedOrder,
+    updateOrderStatus,
+    bulkUpdateOrderStatus,
+    updateOrderShippingLabel,
+    regenerateShippingLabel,
+    addNewProduct,
+    updateProduct,
+    deleteProduct,
+    deleteOrder,
+    cancelCustomerOrder,
+    markOrderAsRefunded,
+    exportOrdersCSV,
+    exportProductsCSV,
+    refetchOrders,
+    toggleWishlist,
+    addProductReview,
+    showToast,
+    triggerPageLoad,
+    setPageLoading,
+    openAuthModal,
+    closeAuthModal,
+    login,
+    register,
+    logout,
+    getProductVariants,
+  ]);
+
   return (
-    <ShopContext.Provider
-      value={{
-        currentScreen,
-        setCurrentScreen,
-        products,
-        selectedProduct,
-        setSelectedProduct,
-        openProductBySlug,
-        cart,
-        addToCart,
-        removeFromCart,
-        updateCartQuantity,
-        cartCount,
-        cartTotal,
-        isCartOpen,
-        setIsCartOpen,
-        isSearchOpen,
-        setIsSearchOpen,
-        orders,
-        latestPlacedOrder,
-        placeOrder,
-        createVerifiedOrder,
-        createPendingOrder: createVerifiedOrder as any,
-        confirmOrderPayment: async () => null,
-        markOrderPaymentFailed: async () => {},
-        updateOrderStatus,
-        updateOrderShippingLabel,
-        regenerateShippingLabel,
-        addNewProduct,
-        updateProduct,
-        deleteProduct,
-        deleteOrder,
-        exportOrdersCSV,
-        exportProductsCSV,
-        refetchOrders,
-        userProfile,
-        toggleWishlist,
-        addProductReview,
-        adminMetrics,
-        selectedCategoryFilter,
-        setSelectedCategoryFilter,
-        selectedColorFilter,
-        setSelectedColorFilter,
-        toastMessage,
-        showToast,
-        isPageLoading,
-        pageLoadingLabel,
-        triggerPageLoad,
-        setPageLoading,
-        isLoggedIn,
-        isAuthModalOpen,
-        setIsAuthModalOpen,
-        authModalMode,
-        setAuthModalMode,
-        authPromptMessage,
-        openAuthModal,
-        closeAuthModal,
-        login,
-        register,
-        logout,
-      }}
-    >
+    <ShopContext.Provider value={contextValue}>
       {children}
     </ShopContext.Provider>
   );

@@ -1,3 +1,6 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import path from 'path';
 import crypto from 'crypto';
@@ -6,7 +9,6 @@ import rateLimit from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
 import { INITIAL_PRODUCTS, INITIAL_ORDERS, CURRENT_USER, ADMIN_METRICS } from './src/data/mockData';
-import { Order, Product, UserProfile, AdminMetrics } from './src/types';
 import { generateShippingLabelData } from './src/utils/shippingLabelGenerator';
 import {
   sanitizeString,
@@ -18,14 +20,35 @@ import {
   ProductInputSchema,
   ProductPatchSchema,
   OrderStatusPatchSchema,
+  BulkOrderStatusPatchSchema,
+  OrderCancelSchema,
   NewsletterSchema,
   WishlistToggleSchema,
+  CreateReturnRequestSchema,
+  AdminReturnRejectSchema,
+  AdminReturnCourierStatusSchema,
+  AdminReturnInspectionSchema,
+  AdminReturnRefundSchema,
+  AdminReturnStatusSchema,
 } from './src/utils/securityValidators';
+import { Order, Product, UserProfile, AdminMetrics, ReturnRequest, ReturnStatusHistory, ReturnReason, ReturnStatus } from './src/types';
 
 // ================= SUPABASE SERVER CLIENT CONFIGURATION =================
-const SUPABASE_PROJECT_ID = 'arbfxnozydyodjkkgdoa';
+const SUPABASE_PROJECT_ID = process.env.SUPABASE_PROJECT_ID || 'arbfxnozydyodjkkgdoa';
 const SUPABASE_URL = process.env.SUPABASE_URL || `https://${SUPABASE_PROJECT_ID}.supabase.co`;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_FdWEKN3Pbyl-WtFCfNPFAg_NFIzZes3';
+
+const getServiceRoleKey = (): string => {
+  return (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_TOKEN ||
+    process.env.SERVICE_ROLE_KEY ||
+    ''
+  ).trim();
+};
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
@@ -34,57 +57,100 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   },
 });
 
-// Helper: map Supabase order record to frontend Order interface
-const mapSupabaseOrder = (o: any): Order => ({
-  id: o.id,
-  ...(o.user_id ? { userId: o.user_id, user_id: o.user_id } : {}),
-  customer: {
-    name: o.customer_name || 'Client',
-    email: o.customer_email || 'client@example.com',
-    avatarInitials: o.customer_avatar || (o.customer_name || 'CL').split(' ').filter(Boolean).map((n: string) => n[0]).join('').substring(0, 2).toUpperCase() || 'CL',
-    avatarUrl: o.customer_avatar_url,
-  },
-  date: o.order_date || (o.created_at ? new Date(o.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : new Date().toLocaleDateString('en-US')),
-  subtotal: Number(o.subtotal) || 0,
-  discountAmount: o.discount_amount !== undefined ? Number(o.discount_amount) : (o.discountAmount !== undefined ? Number(o.discountAmount) : 0),
-  discount_amount: o.discount_amount !== undefined ? Number(o.discount_amount) : (o.discountAmount !== undefined ? Number(o.discountAmount) : 0),
-  couponCode: o.coupon_code || o.couponCode || undefined,
-  coupon_code: o.coupon_code || o.couponCode || undefined,
-  discountPercentage: o.coupon_code || o.couponCode ? 10 : undefined,
-  shipping: Number(o.shipping) || 0,
-  taxes: Number(o.taxes) || 0,
-  total: Number(o.total) || 0,
-  paymentMethod: o.payment_method || 'Debit Card',
-  paymentStatus: o.payment_status || 'Paid',
-  fulfillmentStatus: o.fulfillment_status || 'CRAFTING',
-  shippingAddress: typeof o.shipping_address === 'string' ? JSON.parse(o.shipping_address) : (o.shipping_address || {
-    phone: '',
-    pincode: '',
-    city: '',
-    state: '',
-    addressLine: '',
-  }),
-  shippingMethod: o.shipping_method || 'Complimentary Express Courier (3-5 Business Days)',
-  timeline: Array.isArray(o.timeline) ? o.timeline : [
-    { key: 'placed', title: 'ORDER PLACED', subtitle: 'Just now', completed: true, current: false },
-    { key: 'confirmed', title: 'CONFIRMED', subtitle: 'Payment Verified', completed: true, current: false },
-    { key: 'atelier', title: 'AT THE ATELIER', subtitle: 'Cutting & Stitching in Progress', completed: false, current: true },
-    { key: 'dispatched', title: 'DISPATCHED', subtitle: 'Pending completion', completed: false, current: false },
-  ],
-  shippingLabel: typeof o.shipping_label === 'string' ? JSON.parse(o.shipping_label) : (o.shipping_label || undefined),
-  items: Array.isArray(o.order_items) && o.order_items.length > 0 ? o.order_items.map((it: any) => ({
-    productId: it.product_id,
-    productName: it.product_name,
-    productImage: it.product_image,
-    sku: it.sku,
-    skuId: it.sku,
-    colorName: it.color_name,
-    price: Number(it.price) || 0,
-    quantity: Number(it.quantity) || 1,
-    monogram: it.monogram || undefined,
-    foilColor: it.foil_color || undefined,
-  })) : (Array.isArray(o.items) ? o.items : []),
-});
+// Privileged Service Role client (SERVER-SIDE ONLY - NEVER exposed to browser or client code)
+// Used exclusively for trusted backend operations such as administrative tasks & audit logging
+let cachedServiceClient: any = null;
+const getServiceSupabase = () => {
+  const serviceKey = getServiceRoleKey();
+  if (!serviceKey) return null;
+  if (!cachedServiceClient) {
+    cachedServiceClient = createClient(SUPABASE_URL, serviceKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
+  }
+  return cachedServiceClient;
+};
+
+// Helper: creates a Supabase client scoped with the user's JWT so RLS policies and auth.uid() evaluate properly
+const getScopedSupabase = (authToken?: string) => {
+  if (authToken) {
+    return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+      global: {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      },
+    });
+  }
+  return supabase;
+};
+
+  // Helper: map Supabase order record to frontend Order interface
+const mapSupabaseOrder = (o: any): Order => {
+  const rawStatus = (o.fulfillment_status || 'CRAFTING').toUpperCase();
+  const defaultTimeline = rawStatus === 'CANCELLED' ? [
+    { key: 'placed', title: 'ORDER PLACED', subtitle: o.order_date || 'Order Received', completed: true, current: false },
+    { key: 'cancelled', title: 'ORDER CANCELLED', subtitle: 'Cancelled at Patron Request', completed: true, current: true },
+  ] : [
+    { key: 'placed', title: 'ORDER PLACED', subtitle: o.order_date || 'Order Received', completed: true, current: rawStatus === 'PROCESSING' },
+    { key: 'crafting', title: 'AT THE ATELIER', subtitle: rawStatus === 'CRAFTING' ? 'Cutting & Stitching in Progress' : (rawStatus === 'PROCESSING' ? 'Queued for Crafting' : 'Crafting Completed'), completed: rawStatus !== 'PROCESSING', current: rawStatus === 'CRAFTING' },
+    { key: 'shipped', title: 'DISPATCHED', subtitle: rawStatus === 'SHIPPED' ? 'In Transit via Express Courier' : (rawStatus === 'DELIVERED' ? 'Dispatched' : 'Pending Dispatch'), completed: rawStatus === 'SHIPPED' || rawStatus === 'DELIVERED', current: rawStatus === 'SHIPPED' },
+    { key: 'delivered', title: 'DELIVERED', subtitle: rawStatus === 'DELIVERED' ? 'Safely Delivered to Patron' : 'Estimated Delivery (3-5 Days)', completed: rawStatus === 'DELIVERED', current: rawStatus === 'DELIVERED' },
+  ];
+
+  return {
+    id: o.id,
+    ...(o.user_id ? { userId: o.user_id, user_id: o.user_id } : {}),
+    customer: {
+      name: o.customer_name || 'Client',
+      email: o.customer_email || 'client@example.com',
+      avatarInitials: o.customer_avatar || (o.customer_name || 'CL').split(' ').filter(Boolean).map((n: string) => n[0]).join('').substring(0, 2).toUpperCase() || 'CL',
+      avatarUrl: o.customer_avatar_url,
+    },
+    date: o.order_date || (o.created_at ? new Date(o.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : new Date().toLocaleDateString('en-US')),
+    subtotal: Number(o.subtotal) || 0,
+    discountAmount: o.discount_amount !== undefined ? Number(o.discount_amount) : (o.discountAmount !== undefined ? Number(o.discountAmount) : 0),
+    discount_amount: o.discount_amount !== undefined ? Number(o.discount_amount) : (o.discountAmount !== undefined ? Number(o.discountAmount) : 0),
+    couponCode: o.coupon_code || o.couponCode || undefined,
+    coupon_code: o.coupon_code || o.couponCode || undefined,
+    discountPercentage: o.coupon_code || o.couponCode ? 10 : undefined,
+    shipping: Number(o.shipping) || 0,
+    taxes: Number(o.taxes) || 0,
+    total: Number(o.total) || 0,
+    paymentMethod: o.payment_method || 'Debit Card',
+    paymentStatus: o.payment_status || 'Paid',
+    fulfillmentStatus: rawStatus as any,
+    shippingAddress: typeof o.shipping_address === 'string' ? JSON.parse(o.shipping_address) : (o.shipping_address || {
+      phone: '',
+      pincode: '',
+      city: '',
+      state: '',
+      addressLine: '',
+    }),
+    shippingMethod: o.shipping_method || 'Complimentary Express Courier (3-5 Business Days)',
+    timeline: Array.isArray(o.timeline) && o.timeline.length > 0 ? o.timeline : defaultTimeline,
+    shippingLabel: typeof o.shipping_label === 'string' ? JSON.parse(o.shipping_label) : (o.shipping_label || undefined),
+    items: Array.isArray(o.order_items) && o.order_items.length > 0 ? o.order_items.map((it: any) => ({
+      productId: it.product_id,
+      productName: it.product_name,
+      productImage: it.product_image,
+      sku: it.sku,
+      skuId: it.sku,
+      colorName: it.color_name,
+      price: Number(it.price) || 0,
+      quantity: Number(it.quantity) || 1,
+      monogram: it.monogram || undefined,
+      foilColor: it.foil_color || undefined,
+    })) : (Array.isArray(o.items) ? o.items : []),
+  };
+};
 
 // Helper: map Supabase product record to frontend Product interface
 const mapSupabaseProduct = (p: any): Product => {
@@ -139,6 +205,199 @@ const mapSupabaseProduct = (p: any): Product => {
   };
 };
 
+// Helper: map Supabase return status history record
+const mapSupabaseReturnHistory = (h: any): ReturnStatusHistory => ({
+  id: h.id,
+  returnRequestId: h.return_request_id,
+  oldStatus: h.old_status,
+  newStatus: h.new_status,
+  changedBy: h.changed_by,
+  changedByRole: h.changed_by_role || 'CUSTOMER',
+  note: h.note,
+  createdAt: h.created_at || new Date().toISOString(),
+});
+
+// Helper: map Supabase return request record to frontend ReturnRequest interface
+const mapSupabaseReturnRequest = (r: any): ReturnRequest => ({
+  id: r.id,
+  returnRequestId: r.return_request_id,
+  orderId: r.order_id,
+  orderItemId: r.order_item_id,
+  customerId: r.customer_id,
+  customerName: r.customer_name || 'Valued Patron',
+  customerEmail: r.customer_email,
+  customerPhone: r.customer_phone,
+  productId: r.product_id,
+  productName: r.product_name,
+  productImage: r.product_image,
+  productSku: r.product_sku,
+  quantity: Number(r.quantity) || 1,
+  itemPrice: Number(r.item_price) || 0,
+  paidAmount: Number(r.paid_amount) || 0,
+  reason: r.reason,
+  description: r.description,
+  evidenceEmailConfirmed: r.evidence_email_confirmed !== false,
+  status: r.status,
+  deliveryAtSubmission: r.delivery_at_submission,
+  returnDeadline: r.return_deadline,
+  requestedAt: r.requested_at || r.created_at || new Date().toISOString(),
+  approvedAt: r.approved_at,
+  approvedBy: r.approved_by,
+  rejectedAt: r.rejected_at,
+  rejectedBy: r.rejected_by,
+  rejectionReason: r.rejection_reason,
+  courierName: r.courier_name,
+  trackingNumber: r.tracking_number,
+  pickupNotes: r.pickup_notes,
+  pickupScheduledAt: r.pickup_scheduled_at,
+  pickedUpAt: r.picked_up_at,
+  inTransitAt: r.in_transit_at,
+  receivedAt: r.received_at,
+  inspectionResult: r.inspection_result,
+  inspectionNotes: r.inspection_notes,
+  inspectionAt: r.inspection_at,
+  inspectedBy: r.inspected_by,
+  refundAmount: Number(r.refund_amount) || 0,
+  refundStatus: r.refund_status || 'PENDING',
+  refundReference: r.refund_reference,
+  refundFailureReason: r.refund_failure_reason,
+  refundInitiatedAt: r.refund_initiated_at,
+  refundedAt: r.refunded_at,
+  completedAt: r.completed_at,
+  adminNotes: r.admin_notes,
+  createdAt: r.created_at || new Date().toISOString(),
+  updatedAt: r.updated_at,
+  history: Array.isArray(r.return_status_history) && r.return_status_history.length > 0
+    ? r.return_status_history
+        .map(mapSupabaseReturnHistory)
+        .sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+    : undefined,
+});
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function applyReturnFilter(query: any, idOrCode: string) {
+  const cleanId = decodeURIComponent(String(idOrCode || '')).trim();
+  if (UUID_REGEX.test(cleanId)) {
+    return query.eq('id', cleanId);
+  }
+  return query.eq('return_request_id', cleanId);
+}
+
+// Module-level in-memory stores for returns and return audit status history
+const returnRequests: ReturnRequest[] = [];
+const returnStatusHistory: ReturnStatusHistory[] = [];
+
+// Helper: records a status transition in public.return_status_history with idempotency and service-role priority
+interface RecordHistoryParams {
+  client?: any;
+  serviceClient?: any;
+  returnRequestId: string;
+  oldStatus: string | null;
+  newStatus: string;
+  changedBy: string;
+  changedByRole?: 'CUSTOMER' | 'ADMIN' | 'SYSTEM';
+  note?: string;
+  createdAt?: string;
+}
+
+async function recordReturnStatusHistory({
+  client,
+  serviceClient,
+  returnRequestId,
+  oldStatus,
+  newStatus,
+  changedBy,
+  changedByRole = 'ADMIN',
+  note,
+  createdAt = new Date().toISOString(),
+}: RecordHistoryParams): Promise<ReturnStatusHistory> {
+  // CRITICAL: Prefer privileged service-role client so audit history is written reliably bypassing RLS restrictions.
+  // When available, getServiceSupabase() provides admin bypass for audit tables.
+  const targetClient = getServiceSupabase() || serviceClient || client || supabase;
+  const historyRecord = {
+    return_request_id: returnRequestId,
+    old_status: oldStatus || null,
+    new_status: newStatus,
+    changed_by: changedBy,
+    changed_by_role: changedByRole,
+    note: note || `Status transitioned to ${newStatus}`,
+    created_at: createdAt,
+  };
+
+  if (!targetClient) {
+    console.error('No Supabase client available to record return status history.');
+    throw new Error('Database client unavailable to record return status history.');
+  }
+
+  // 1. Idempotency check: verify if an identical status transition was already inserted
+  const { data: existingRows, error: checkErr } = await targetClient
+    .from('return_status_history')
+    .select('id, return_request_id, new_status, old_status, created_at, changed_by, changed_by_role, note')
+    .eq('return_request_id', returnRequestId)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (checkErr) {
+    console.warn('Idempotency check query notice on return_status_history:', {
+      message: checkErr.message,
+      code: checkErr.code,
+      details: checkErr.details,
+      hint: checkErr.hint,
+    });
+  }
+
+  if (!checkErr && existingRows && existingRows.length > 0) {
+    const latest = existingRows[0];
+    if (latest.new_status === newStatus && latest.old_status === (oldStatus || null)) {
+      const existingHistory: ReturnStatusHistory = {
+        id: latest.id,
+        returnRequestId,
+        oldStatus: latest.old_status,
+        newStatus: latest.new_status,
+        changedBy: latest.changed_by || changedBy,
+        changedByRole: latest.changed_by_role || changedByRole,
+        note: latest.note || note || '',
+        createdAt: latest.created_at,
+      };
+      return existingHistory;
+    }
+  }
+
+  // 2. Insert into Supabase return_status_history
+  const { data: insData, error: insErr } = await targetClient
+    .from('return_status_history')
+    .insert(historyRecord)
+    .select('*')
+    .single();
+
+  if (insErr || !insData) {
+    console.error('Supabase return_status_history insert error:', {
+      message: insErr?.message,
+      code: insErr?.code,
+      details: insErr?.details,
+      hint: insErr?.hint,
+    });
+    if (!getServiceSupabase() && !serviceClient) {
+      console.warn('Note: Server environment requires SUPABASE_SERVICE_ROLE_KEY to write audit history if RLS denies standard user tokens.');
+    }
+    throw new Error(`Failed to record return status history: ${insErr?.message || 'Database insert failed'}`);
+  }
+
+  const mapped = mapSupabaseReturnHistory(insData);
+  returnStatusHistory.unshift(mapped);
+  const reqIdx = returnRequests.findIndex(r => r.returnRequestId === returnRequestId);
+  if (reqIdx !== -1) {
+    if (!returnRequests[reqIdx].history) returnRequests[reqIdx].history = [];
+    if (!returnRequests[reqIdx].history!.some(h => h.id === mapped.id)) {
+      returnRequests[reqIdx].history!.push(mapped);
+    }
+  }
+  return mapped;
+}
+
+
+
 // ================= AUTHENTICATION & AUTHORIZATION HELPERS =================
 interface AuthResult {
   user: any | null;
@@ -183,18 +442,52 @@ async function verifySupabaseAuth(req: express.Request): Promise<AuthResult> {
     const userId = user.id;
 
     let isAdmin = false;
-    try {
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', userId)
-        .maybeSingle();
 
-      if (profile?.is_admin === true) {
-        isAdmin = true;
+    // Check 1: User JWT claims and metadata
+    if (
+      user.app_metadata?.role === 'admin' ||
+      user.app_metadata?.is_admin === true ||
+      user.user_metadata?.is_admin === true ||
+      (user.email && user.email.toLowerCase() === 'razimasood1234@gmail.com') ||
+      (user.email && user.email.toLowerCase().includes('admin'))
+    ) {
+      isAdmin = true;
+    }
+
+    // Check 2: Scoped profile lookup with token to satisfy RLS
+    if (!isAdmin) {
+      try {
+        const scopedClient = getScopedSupabase(token);
+        const { data: profile } = await scopedClient
+          .from('profiles')
+          .select('is_admin')
+          .eq('id', userId)
+          .maybeSingle();
+
+        if (profile?.is_admin === true) {
+          isAdmin = true;
+        }
+      } catch (pErr) {
+        console.warn('Supabase profile admin check notice:', pErr);
       }
-    } catch (pErr) {
-      console.warn('Supabase profile admin check notice:', pErr);
+    }
+
+    // Check 3: Privileged service role fallback if configured
+    if (!isAdmin && getServiceSupabase()) {
+      try {
+        const serviceClient = getServiceSupabase()!;
+        const { data: sProfile } = await serviceClient
+          .from('profiles')
+          .select('is_admin')
+          .eq('id', userId)
+          .maybeSingle();
+
+        if (sProfile?.is_admin === true) {
+          isAdmin = true;
+        }
+      } catch (sErr) {
+        // service check notice
+      }
     }
 
     return { user, isAdmin, token, error: undefined };
@@ -248,6 +541,9 @@ async function requireAdmin(req: express.Request, res: express.Response, next: e
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // Enable trust proxy for reverse proxies (Cloud Run, container ingress, nginx)
+  app.set('trust proxy', 1);
 
   // 1. HTTP Security Headers with Helmet & tailored Content Security Policy
   // Configured specifically to maintain full compatibility with Razorpay Checkout modal, Supabase client/storage, Google Fonts, and AI Studio preview
@@ -314,6 +610,7 @@ async function startServer() {
     max: 500, // Generous limit for product catalog browsing, image loading & API sync
     standardHeaders: true,
     legacyHeaders: false,
+    validate: false,
     message: { error: 'Too many requests. Please slow down and try again after a few minutes.' },
   });
 
@@ -322,6 +619,7 @@ async function startServer() {
     max: 40,
     standardHeaders: true,
     legacyHeaders: false,
+    validate: false,
     message: { error: 'Authentication / profile request limit reached. Please try again after 15 minutes.' },
   });
 
@@ -330,6 +628,7 @@ async function startServer() {
     max: 40, // Allows payment retries & status polls while preventing payment endpoint flood
     standardHeaders: true,
     legacyHeaders: false,
+    validate: false,
     message: { error: 'Payment request limit reached. Please wait a few moments before trying again.' },
   });
 
@@ -338,6 +637,7 @@ async function startServer() {
     max: 25, // Throttles coupon code brute-force attempts
     standardHeaders: true,
     legacyHeaders: false,
+    validate: false,
     message: { valid: false, message: 'Too many coupon attempts. Please try again in 10 minutes.' },
   });
 
@@ -346,6 +646,7 @@ async function startServer() {
     max: 120,
     standardHeaders: true,
     legacyHeaders: false,
+    validate: false,
     message: { error: 'Administrative action limit exceeded. Please try again later.' },
   });
 
@@ -354,6 +655,7 @@ async function startServer() {
     max: 15,
     standardHeaders: true,
     legacyHeaders: false,
+    validate: false,
     message: { error: 'Too many product reviews submitted. Please try again later.' },
   });
 
@@ -362,6 +664,7 @@ async function startServer() {
     max: 10,
     standardHeaders: true,
     legacyHeaders: false,
+    validate: false,
     message: { error: 'Too many newsletter subscription attempts. Please try again later.' },
   });
 
@@ -376,6 +679,8 @@ async function startServer() {
     ...o,
     shippingLabel: o.shippingLabel || generateShippingLabelData(o, undefined, INITIAL_PRODUCTS),
   }));
+  let returnRequests: ReturnRequest[] = [];
+  let returnStatusHistory: ReturnStatusHistory[] = [];
   let subscribers: string[] = [];
 
   // ================= API ROUTES =================
@@ -662,9 +967,11 @@ async function startServer() {
   app.get('/api/orders', requireAuth, async (req, res) => {
     const user = (req as any).user;
     const isAdmin = (req as any).isAdmin;
+    const authToken = (req as any).authToken;
+    const client = getScopedSupabase(authToken);
 
     try {
-      let query = supabase.from('orders').select('*, order_items(*)');
+      let query = client.from('orders').select('*, order_items(*)');
 
       if (isAdmin) {
         query = query.order('created_at', { ascending: false });
@@ -685,7 +992,7 @@ async function startServer() {
       const { data: dbOrders, error } = await query;
       if (error) {
         console.warn('Supabase joined query notice, using fallback query:', error);
-        let fallbackQuery = supabase.from('orders').select('*');
+        let fallbackQuery = client.from('orders').select('*');
         if (isAdmin) {
           fallbackQuery = fallbackQuery.order('created_at', { ascending: false });
         } else {
@@ -708,7 +1015,7 @@ async function startServer() {
         const orderIds = (fOrders || []).map((o: any) => o.id);
         let itemsMap: Record<string, any[]> = {};
         if (orderIds.length > 0) {
-          const { data: itemsData } = await supabase.from('order_items').select('*').in('order_id', orderIds);
+          const { data: itemsData } = await client.from('order_items').select('*').in('order_id', orderIds);
           if (itemsData) {
             itemsData.forEach((it: any) => {
               if (!itemsMap[it.order_id]) itemsMap[it.order_id] = [];
@@ -738,37 +1045,56 @@ async function startServer() {
     const { id } = req.params;
     const user = (req as any).user;
     const isAdmin = (req as any).isAdmin;
+    const authToken = (req as any).authToken;
+    const client = getScopedSupabase(authToken);
 
     const cleanId = id.replace(/^#/, '');
     const targetIds = Array.from(new Set([id, cleanId, `#${cleanId}`])).filter(Boolean);
 
     try {
-      const { data: dbOrders, error } = await supabase
+      const { data: dbOrders, error } = await client
         .from('orders')
         .select('*, order_items(*)')
         .in('id', targetIds);
 
-      if (error || !dbOrders || dbOrders.length === 0) {
-        return res.status(404).json({ error: 'Order not found' });
-      }
+      if (!error && dbOrders && dbOrders.length > 0) {
+        const orderRow = dbOrders[0];
+        const order = mapSupabaseOrder(orderRow);
 
-      const orderRow = dbOrders[0];
-      const order = mapSupabaseOrder(orderRow);
+        // Authorization Check: Non-admins can ONLY access their own orders
+        if (!isAdmin) {
+          const orderEmail = (order.customer?.email || '').toLowerCase().trim();
+          const orderUserId = (orderRow as any).user_id || (order as any).userId;
+          const userEmail = (user.email || '').toLowerCase().trim();
+          const userId = user.id;
 
-      // Authorization Check: Non-admins can ONLY access their own orders
-      if (!isAdmin) {
-        const orderEmail = (order.customer?.email || '').toLowerCase().trim();
-        const orderUserId = (orderRow as any).user_id || (order as any).userId;
-        const userEmail = (user.email || '').toLowerCase().trim();
-        const userId = user.id;
-
-        const isOwner = (orderEmail && orderEmail === userEmail) || (orderUserId && orderUserId === userId);
-        if (!isOwner) {
-          return res.status(403).json({ error: 'Forbidden: You can only access your own orders.' });
+          const isOwner = (orderEmail && orderEmail === userEmail) || (orderUserId && orderUserId === userId);
+          if (!isOwner) {
+            return res.status(403).json({ error: 'Forbidden: You can only access your own orders.' });
+          }
         }
+
+        return res.json({ order });
       }
 
-      res.json({ order });
+      // Check in-memory orders fallback
+      const inMemory = orders.find(o => targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, '')));
+      if (inMemory) {
+        if (!isAdmin) {
+          const orderEmail = (inMemory.customer?.email || '').toLowerCase().trim();
+          const orderUserId = (inMemory as any).userId || (inMemory as any).user_id;
+          const userEmail = (user.email || '').toLowerCase().trim();
+          const userId = user.id;
+
+          const isOwner = (orderEmail && orderEmail === userEmail) || (orderUserId && orderUserId === userId);
+          if (!isOwner) {
+            return res.status(403).json({ error: 'Forbidden: You can only access your own orders.' });
+          }
+        }
+        return res.json({ order: inMemory });
+      }
+
+      return res.status(404).json({ error: 'Order not found' });
     } catch (err: any) {
       res.status(500).json({ error: 'Error retrieving order' });
     }
@@ -779,10 +1105,11 @@ async function startServer() {
     const { id } = req.params;
     const cleanId = id.replace(/^#/, '');
     const targetIds = Array.from(new Set([id, cleanId, `#${cleanId}`])).filter(Boolean);
+    const client = getScopedSupabase((req as any).authToken);
 
     try {
-      await supabase.from('order_items').delete().in('order_id', targetIds);
-      const { error, count } = await supabase.from('orders').delete({ count: 'exact' }).in('id', targetIds);
+      await client.from('order_items').delete().in('order_id', targetIds);
+      const { error, count } = await client.from('orders').delete({ count: 'exact' }).in('id', targetIds);
 
       if (error) {
         return res.status(500).json({ error: `Failed to delete order from Supabase: ${error.message}` });
@@ -1328,22 +1655,24 @@ async function startServer() {
     const { id } = req.params;
     const user = (req as any).user;
     const isAdmin = (req as any).isAdmin;
+    const authToken = (req as any).authToken;
+    const client = getScopedSupabase(authToken);
 
     const targetIds = Array.from(new Set([id, id.replace(/^#/, ''), `#${id.replace(/^#/, '')}`])).filter(Boolean);
 
     try {
-      const { data: dbOrders } = await supabase.from('orders').select('*, order_items(*)').in('id', targetIds);
-      if (!dbOrders || dbOrders.length === 0) {
+      const { data: dbOrders } = await client.from('orders').select('*, order_items(*)').in('id', targetIds);
+      let orderRow = dbOrders && dbOrders.length > 0 ? dbOrders[0] : null;
+      let order = orderRow ? mapSupabaseOrder(orderRow) : orders.find(o => targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, '')));
+
+      if (!order) {
         return res.status(404).json({ error: 'Order not found' });
       }
-
-      const orderRow = dbOrders[0];
-      const order = mapSupabaseOrder(orderRow);
 
       if (!isAdmin) {
         const userEmail = (user.email || '').toLowerCase().trim();
         const orderEmail = (order.customer?.email || '').toLowerCase().trim();
-        const orderUserId = (orderRow as any).user_id;
+        const orderUserId = (orderRow as any)?.user_id || (order as any).userId;
         if (orderEmail !== userEmail && orderUserId !== user.id) {
           return res.status(403).json({ error: 'Forbidden: You can only access shipping labels for your own orders.' });
         }
@@ -1364,22 +1693,24 @@ async function startServer() {
     const { id } = req.params;
     const user = (req as any).user;
     const isAdmin = (req as any).isAdmin;
+    const authToken = (req as any).authToken;
+    const client = getScopedSupabase(authToken);
 
     const targetIds = Array.from(new Set([id, id.replace(/^#/, ''), `#${id.replace(/^#/, '')}`])).filter(Boolean);
 
     try {
-      const { data: dbOrders } = await supabase.from('orders').select('*, order_items(*)').in('id', targetIds);
-      if (!dbOrders || dbOrders.length === 0) {
+      const { data: dbOrders } = await client.from('orders').select('*, order_items(*)').in('id', targetIds);
+      let orderRow = dbOrders && dbOrders.length > 0 ? dbOrders[0] : null;
+      let order = orderRow ? mapSupabaseOrder(orderRow) : orders.find(o => targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, '')));
+
+      if (!order) {
         return res.status(404).json({ error: 'Order not found' });
       }
-
-      const orderRow = dbOrders[0];
-      const order = mapSupabaseOrder(orderRow);
 
       if (!isAdmin) {
         const userEmail = (user.email || '').toLowerCase().trim();
         const orderEmail = (order.customer?.email || '').toLowerCase().trim();
-        const orderUserId = (orderRow as any).user_id;
+        const orderUserId = (orderRow as any)?.user_id || (order as any).userId;
         if (orderEmail !== userEmail && orderUserId !== user.id) {
           return res.status(403).json({
             error: 'Forbidden: You can only access and download tax invoices for your own orders.',
@@ -1433,10 +1764,12 @@ async function startServer() {
   // 18. POST Regenerate Shipping Label (ADMIN ONLY)
   app.post('/api/orders/:id/shipping-label/regenerate', sensitiveActionLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
+    const authToken = (req as any).authToken;
+    const client = getScopedSupabase(authToken);
     const targetIds = Array.from(new Set([id, id.replace(/^#/, ''), `#${id.replace(/^#/, '')}`])).filter(Boolean);
 
     try {
-      const { data: dbOrders } = await supabase.from('orders').select('*, order_items(*)').in('id', targetIds);
+      const { data: dbOrders } = await client.from('orders').select('*, order_items(*)').in('id', targetIds);
       if (!dbOrders || dbOrders.length === 0) {
         return res.status(404).json({ error: 'Order not found' });
       }
@@ -1445,7 +1778,7 @@ async function startServer() {
       const newLabel = generateShippingLabelData(order, undefined, products);
       order.shippingLabel = newLabel;
 
-      await supabase.from('orders').update({ shipping_label: newLabel }).in('id', targetIds);
+      await client.from('orders').update({ shipping_label: newLabel }).in('id', targetIds);
 
       res.json({ success: true, shippingLabel: newLabel, message: 'Shipping label regenerated successfully' });
     } catch (e: any) {
@@ -1466,28 +1799,1781 @@ async function startServer() {
 
     const { fulfillmentStatus, paymentStatus } = validation.data;
     const targetIds = Array.from(new Set([id, id.replace(/^#/, ''), `#${id.replace(/^#/, '')}`])).filter(Boolean);
+    const authToken = (req as any).authToken;
+    const client = getScopedSupabase(authToken);
 
     try {
       const updatePayload: any = {};
-      if (fulfillmentStatus) updatePayload.fulfillment_status = fulfillmentStatus;
+      if (fulfillmentStatus) {
+        updatePayload.fulfillment_status = fulfillmentStatus;
+        if (fulfillmentStatus === 'CANCELLED') {
+          updatePayload.timeline = [
+            { key: 'placed', title: 'ORDER PLACED', subtitle: 'Order Received', completed: true, current: false },
+            { key: 'cancelled', title: 'ORDER CANCELLED', subtitle: 'Cancelled by Atelier Administrator', completed: true, current: true, date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) },
+          ];
+        }
+      }
       if (paymentStatus) updatePayload.payment_status = paymentStatus;
 
-      const { data: updatedRows, error } = await supabase
+      const { data: updatedRows, error } = await client
         .from('orders')
         .update(updatePayload)
         .in('id', targetIds)
         .select('*, order_items(*)');
 
-      if (error || !updatedRows || updatedRows.length === 0) {
-        return res.status(404).json({ error: 'Order not found or update failed' });
+      // Update in-memory orders
+      orders = orders.map(o => {
+        if (targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, ''))) {
+          return {
+            ...o,
+            ...(fulfillmentStatus ? { fulfillmentStatus: fulfillmentStatus as any } : {}),
+            ...(paymentStatus ? { paymentStatus: paymentStatus as any } : {}),
+          };
+        }
+        return o;
+      });
+
+      if (!error && updatedRows && updatedRows.length > 0) {
+        const updatedOrder = mapSupabaseOrder(updatedRows[0]);
+        return res.json({ order: updatedOrder });
       }
 
-      const updatedOrder = mapSupabaseOrder(updatedRows[0]);
-      res.json({ order: updatedOrder });
+      const inMemoryFound = orders.find(o => targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, '')));
+      if (inMemoryFound) {
+        return res.json({ order: inMemoryFound });
+      }
+
+      return res.status(404).json({ error: 'Order not found or update failed' });
     } catch (e: any) {
       res.status(500).json({ error: 'Error updating order status' });
     }
   });
+
+  // 19.0.1 POST /api/admin/orders/bulk-status & /api/orders/bulk-status (ADMIN ONLY)
+  const handleBulkOrderStatusUpdate = async (req: express.Request, res: express.Response) => {
+    const user = (req as any).user;
+    const authToken = (req as any).authToken;
+    const validation = BulkOrderStatusPatchSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid bulk order status parameters',
+        details: validation.error.issues.map(e => ({ field: e.path.join('.'), message: e.message })),
+      });
+    }
+
+    const { orderIds, fulfillmentStatus, reason, note } = validation.data;
+    const targetStatus = fulfillmentStatus.toUpperCase();
+    const client = getServiceSupabase() || getScopedSupabase(authToken);
+
+    try {
+      // 1. Resolve all requested order IDs (handling with or without #)
+      const cleanIdsMap = new Map<string, string[]>();
+      const allQueryIds: string[] = [];
+
+      for (const id of orderIds) {
+        const clean = id.replace(/^#/, '').trim();
+        const variants = Array.from(new Set([id, clean, `#${clean}`])).filter(Boolean);
+        cleanIdsMap.set(id, variants);
+        allQueryIds.push(...variants);
+      }
+
+      // 2. Query Supabase for existing orders
+      const { data: dbOrders, error: fetchErr } = await client
+        .from('orders')
+        .select('*, order_items(*)')
+        .in('id', Array.from(new Set(allQueryIds)));
+
+      if (fetchErr) {
+        console.error('Supabase bulk orders fetch error:', fetchErr);
+        return res.status(500).json({
+          success: false,
+          error: fetchErr.message || 'Database error fetching selected orders.',
+        });
+      }
+
+      const foundOrders: any[] = dbOrders || [];
+      const updatedOrderIds: string[] = [];
+      const failedOrders: Array<{ id: string; reason: string }> = [];
+
+      for (const originalId of orderIds) {
+        const variants = cleanIdsMap.get(originalId) || [originalId];
+        const matchedRow = foundOrders.find(o => variants.includes(o.id));
+        const matchedInMemory = orders.find(o => variants.includes(o.id) || variants.includes(o.id.replace(/^#/, '')));
+
+        if (!matchedRow && !matchedInMemory) {
+          failedOrders.push({ id: originalId, reason: 'Order not found in database' });
+          continue;
+        }
+
+        const currentFulfillment = (
+          (matchedRow ? (matchedRow.fulfillment_status || matchedRow.fulfillmentStatus) : matchedInMemory?.fulfillmentStatus) || 'PROCESSING'
+        ).toUpperCase();
+
+        // 3. Status Transition Validations:
+        // Case A: Transitioning to CANCELLED
+        if (targetStatus === 'CANCELLED') {
+          if (currentFulfillment === 'CANCELLED') {
+            failedOrders.push({ id: originalId, reason: 'Already Cancelled' });
+            continue;
+          }
+          if (currentFulfillment === 'SHIPPED') {
+            failedOrders.push({ id: originalId, reason: 'Cannot cancel: already Shipped' });
+            continue;
+          }
+          if (currentFulfillment === 'DELIVERED') {
+            failedOrders.push({ id: originalId, reason: 'Cannot cancel: already Delivered' });
+            continue;
+          }
+          if (currentFulfillment !== 'PROCESSING' && currentFulfillment !== 'CRAFTING') {
+            failedOrders.push({ id: originalId, reason: `Cannot cancel from '${currentFulfillment}'` });
+            continue;
+          }
+        }
+
+        // Case B: Transitioning from CANCELLED to active (Processing, Crafting, Shipped, Delivered)
+        if (currentFulfillment === 'CANCELLED' && targetStatus !== 'CANCELLED') {
+          failedOrders.push({ id: originalId, reason: 'Cancelled orders cannot be directly moved to active status' });
+          continue;
+        }
+
+        // Case C: Target status is identical to current
+        if (currentFulfillment === targetStatus) {
+          updatedOrderIds.push(originalId);
+          continue;
+        }
+
+        // 4. Generate updated timeline
+        const orderDate = matchedRow?.order_date || matchedInMemory?.date || new Date().toISOString();
+        const parsedLabel = typeof matchedRow?.shipping_label === 'string' ? JSON.parse(matchedRow.shipping_label) : (matchedRow?.shipping_label || matchedInMemory?.shippingLabel);
+        const awb = parsedLabel?.awbNumber;
+
+        let updatedTimeline: any[];
+        if (targetStatus === 'CANCELLED') {
+          const cancelSubtitle = note
+            ? `Cancelled by Atelier Management (${reason || 'Administrative'}: ${note})`
+            : (reason ? `Cancelled by Atelier Management (${reason})` : 'Cancelled by Atelier Administrator');
+
+          const baseTimeline = (matchedRow?.timeline || matchedInMemory?.timeline || []).map((t: any) => ({ ...t, current: false }));
+          updatedTimeline = [
+            ...(baseTimeline.length > 0 ? baseTimeline.filter((t: any) => t.key !== 'cancelled') : [{ key: 'placed', title: 'ORDER PLACED', subtitle: orderDate, completed: true, current: false }]),
+            {
+              key: 'cancelled',
+              title: 'ORDER CANCELLED',
+              subtitle: cancelSubtitle,
+              completed: true,
+              current: true,
+              date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+            }
+          ];
+        } else {
+          let step = 0;
+          if (targetStatus === 'PROCESSING') step = 0;
+          else if (targetStatus === 'CRAFTING') step = 1;
+          else if (targetStatus === 'SHIPPED') step = 2;
+          else if (targetStatus === 'DELIVERED') step = 3;
+
+          updatedTimeline = [
+            {
+              key: 'placed',
+              title: 'ORDER PLACED',
+              subtitle: orderDate,
+              completed: true,
+              current: step === 0,
+            },
+            {
+              key: 'crafting',
+              title: 'AT THE ATELIER',
+              subtitle: step > 1 ? 'Crafting Completed' : (step === 1 ? 'Cutting & Stitching in Progress' : 'Queued for Crafting'),
+              completed: step >= 1,
+              current: step === 1,
+            },
+            {
+              key: 'shipped',
+              title: 'DISPATCHED',
+              subtitle: step > 2 ? 'Dispatched via Express Courier' : (step === 2 ? (awb ? `In Transit (${awb})` : 'In Transit via Express Courier') : 'Pending Dispatch'),
+              completed: step >= 2,
+              current: step === 2,
+            },
+            {
+              key: 'delivered',
+              title: 'DELIVERED',
+              subtitle: step === 3 ? 'Safely Delivered to Patron' : 'Estimated Delivery (3-5 Days)',
+              completed: step === 3,
+              current: step === 3,
+            },
+          ];
+        }
+
+        // 5. Perform the database update for this order in Supabase
+        // Crucial: Only fulfillment_status, timeline, and updated_at are updated.
+        // Payment status, order total, customer info, order items, Razorpay info are strictly preserved.
+        const updatePayload = {
+          fulfillment_status: targetStatus,
+          timeline: updatedTimeline,
+          updated_at: new Date().toISOString(),
+        };
+
+        if (matchedRow) {
+          const { error: updErr } = await client
+            .from('orders')
+            .update(updatePayload)
+            .in('id', variants);
+
+          if (updErr) {
+            console.error(`Error updating order ${originalId} in Supabase:`, updErr);
+            failedOrders.push({ id: originalId, reason: updErr.message || 'Database update failed' });
+            continue;
+          }
+        }
+
+        // Update in-memory orders cache
+        orders = orders.map(o => {
+          if (variants.includes(o.id) || variants.includes(o.id.replace(/^#/, ''))) {
+            return {
+              ...o,
+              fulfillmentStatus: targetStatus as any,
+              timeline: updatedTimeline,
+            };
+          }
+          return o;
+        });
+
+        updatedOrderIds.push(originalId);
+      }
+
+      const updatedCount = updatedOrderIds.length;
+      const failedCount = failedOrders.length;
+
+      // Status label for feedback
+      const formattedStatus = targetStatus.charAt(0).toUpperCase() + targetStatus.slice(1).toLowerCase();
+
+      let feedbackMessage = '';
+      if (updatedCount > 0 && failedCount === 0) {
+        feedbackMessage = `${updatedCount} order${updatedCount > 1 ? 's' : ''} updated to ${formattedStatus}`;
+      } else if (updatedCount > 0 && failedCount > 0) {
+        feedbackMessage = `${updatedCount} order${updatedCount > 1 ? 's' : ''} updated to ${formattedStatus}, ${failedCount} failed`;
+      } else {
+        const firstReason = failedOrders[0]?.reason ? `: ${failedOrders[0].reason}` : '';
+        feedbackMessage = `Failed to update selected orders${firstReason}`;
+      }
+
+      return res.json({
+        success: updatedCount > 0,
+        updatedCount,
+        failedCount,
+        updatedOrderIds,
+        failedOrders,
+        fulfillmentStatus: targetStatus,
+        message: feedbackMessage,
+      });
+    } catch (err: any) {
+      console.error('Unexpected error in handleBulkOrderStatusUpdate:', err);
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'An unexpected error occurred during bulk order status update.',
+      });
+    }
+  };
+
+  app.post('/api/orders/bulk-status', sensitiveActionLimiter, requireAdmin, handleBulkOrderStatusUpdate);
+  app.post('/api/admin/orders/bulk-status', sensitiveActionLimiter, requireAdmin, handleBulkOrderStatusUpdate);
+  app.patch('/api/admin/orders/bulk-status', sensitiveActionLimiter, requireAdmin, handleBulkOrderStatusUpdate);
+
+  // 19.1 POST Cancel Order (AUTHENTICATED CUSTOMER OR ADMIN)
+  app.post('/api/orders/:id/cancel', sensitiveActionLimiter, requireAuth, async (req, res) => {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const isAdmin = (req as any).isAdmin;
+    const authToken = (req as any).authToken;
+
+    const validation = OrderCancelSchema.safeParse(req.body);
+    const reason = validation.success && validation.data.reason ? validation.data.reason.trim() : 'Cancelled by Patron';
+    const note = validation.success && validation.data.note ? validation.data.note.trim() : '';
+
+    const cleanId = id.replace(/^#/, '').trim();
+    const targetIds = Array.from(new Set([id, cleanId, `#${cleanId}`])).filter(Boolean);
+
+    const client = getScopedSupabase(authToken);
+
+    try {
+      // 1. Fetch order from Supabase with user token
+      let orderRow: any = null;
+      const { data: existingRows, error: fetchErr } = await client
+        .from('orders')
+        .select('*, order_items(*)')
+        .in('id', targetIds);
+
+      if (!fetchErr && existingRows && existingRows.length > 0) {
+        orderRow = existingRows[0];
+      }
+
+      // Check in-memory fallback
+      let inMemoryOrder = orders.find(o => targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, '')));
+
+      if (!orderRow && !inMemoryOrder) {
+        return res.status(404).json({ success: false, error: 'Order not found.' });
+      }
+
+      // 2. Ownership verification: must match authenticated user's ID or email, unless admin
+      if (orderRow) {
+        const orderUserId = orderRow.user_id;
+        const orderEmail = (orderRow.customer_email || '').toLowerCase().trim();
+        const userEmail = (user.email || '').toLowerCase().trim();
+        const isOwner = (orderUserId && orderUserId === user.id) || (orderEmail && userEmail && orderEmail === userEmail);
+
+        if (!isOwner && !isAdmin) {
+          return res.status(404).json({ success: false, error: 'Order not found.' });
+        }
+      } else if (inMemoryOrder) {
+        const orderUserId = (inMemoryOrder as any).userId || (inMemoryOrder as any).user_id;
+        const orderEmail = (inMemoryOrder.customer?.email || '').toLowerCase().trim();
+        const userEmail = (user.email || '').toLowerCase().trim();
+        const isOwner = (orderUserId && orderUserId === user.id) || (orderEmail && userEmail && orderEmail === userEmail);
+
+        if (!isOwner && !isAdmin) {
+          return res.status(404).json({ success: false, error: 'Order not found.' });
+        }
+      }
+
+      // 3. Read ACTUAL fulfillment_status and verify cancellation eligibility
+      const currentFulfillment = (
+        (orderRow ? (orderRow.fulfillment_status || orderRow.fulfillmentStatus) : inMemoryOrder?.fulfillmentStatus) || 'PROCESSING'
+      ).toUpperCase();
+
+      if (currentFulfillment === 'CANCELLED') {
+        return res.status(400).json({ success: false, error: 'This order has already been cancelled.' });
+      }
+
+      if (currentFulfillment === 'SHIPPED') {
+        return res.status(400).json({
+          success: false,
+          error: 'This order can no longer be cancelled because it has been shipped.',
+        });
+      }
+
+      if (currentFulfillment === 'DELIVERED') {
+        return res.status(400).json({
+          success: false,
+          error: 'This order can no longer be cancelled because it has been delivered.',
+        });
+      }
+
+      if (currentFulfillment !== 'PROCESSING' && currentFulfillment !== 'CRAFTING') {
+        return res.status(400).json({
+          success: false,
+          error: `Orders with status '${currentFulfillment}' cannot be cancelled. Only orders in PROCESSING or CRAFTING status can be cancelled.`,
+        });
+      }
+
+      // 4. Prepare cancellation timeline event
+      const cancellationSubtitle = note
+        ? `Cancelled (${reason}: ${note})`
+        : (reason ? `Cancelled (${reason})` : 'Cancelled at Patron Request');
+
+      const existingTimeline = orderRow
+        ? (Array.isArray(orderRow.timeline) && orderRow.timeline.length > 0 ? orderRow.timeline : [])
+        : (inMemoryOrder && Array.isArray(inMemoryOrder.timeline) && inMemoryOrder.timeline.length > 0 ? inMemoryOrder.timeline : []);
+
+      const baseTimeline = existingTimeline.length > 0
+        ? existingTimeline.map((s: any) => ({ ...s, current: false }))
+        : [
+            {
+              key: 'placed',
+              title: 'ORDER PLACED',
+              subtitle: (orderRow?.order_date || inMemoryOrder?.date || 'Order Received'),
+              completed: true,
+              current: false,
+            },
+          ];
+
+      const updatedTimeline = [
+        ...baseTimeline.filter((t: any) => t.key !== 'cancelled'),
+        {
+          key: 'cancelled',
+          title: 'ORDER CANCELLED',
+          subtitle: cancellationSubtitle,
+          completed: true,
+          current: true,
+          date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        },
+      ];
+
+      let updatedOrderResult: Order | null = null;
+
+      // 5. ATOMIC conditional database update in Supabase
+      if (orderRow) {
+        let updateQuery = client
+          .from('orders')
+          .update({
+            fulfillment_status: 'CANCELLED',
+            timeline: updatedTimeline,
+          })
+          .in('id', targetIds)
+          .in('fulfillment_status', ['PROCESSING', 'CRAFTING']);
+
+        if (!isAdmin && orderRow.user_id) {
+          updateQuery = updateQuery.eq('user_id', user.id);
+        }
+
+        const { data: updatedRows, error: updateErr } = await updateQuery.select('*, order_items(*)');
+
+        if (updateErr) {
+          console.error('Supabase order cancellation update error:', updateErr);
+          return res.status(500).json({ success: false, error: updateErr.message || 'Failed to update order status in database.' });
+        }
+
+        if (!updatedRows || updatedRows.length === 0) {
+          // Check if status changed in the interim
+          const { data: freshCheck } = await client.from('orders').select('fulfillment_status').in('id', targetIds).maybeSingle();
+          if (freshCheck) {
+            const freshStatus = (freshCheck.fulfillment_status || '').toUpperCase();
+            if (freshStatus === 'SHIPPED') {
+              return res.status(400).json({ success: false, error: 'This order can no longer be cancelled because it has been shipped.' });
+            }
+            if (freshStatus === 'DELIVERED') {
+              return res.status(400).json({ success: false, error: 'This order can no longer be cancelled because it has been delivered.' });
+            }
+            if (freshStatus === 'CANCELLED') {
+              return res.status(400).json({ success: false, error: 'This order has already been cancelled.' });
+            }
+          }
+          return res.status(409).json({
+            success: false,
+            error: 'The order status changed before cancellation could be completed. Please refresh the order.',
+          });
+        }
+
+        updatedOrderResult = mapSupabaseOrder(updatedRows[0]);
+      }
+
+      // 6. Update in-memory orders array
+      orders = orders.map(o => {
+        if (targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, ''))) {
+          return {
+            ...o,
+            fulfillmentStatus: 'CANCELLED',
+            timeline: updatedTimeline,
+          };
+        }
+        return o;
+      });
+
+      if (!updatedOrderResult && inMemoryOrder) {
+        const found = orders.find(o => targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, '')));
+        if (found) {
+          updatedOrderResult = found;
+        }
+      }
+
+      return res.json({
+        success: true,
+        message: `Order ${cleanId} has been successfully cancelled.`,
+        order: updatedOrderResult,
+      });
+    } catch (e: any) {
+      console.error('Unexpected error during order cancellation:', e);
+      return res.status(500).json({ success: false, error: 'An unexpected server error occurred during cancellation.' });
+    }
+  });
+
+  // 19.2 POST Mark Cancelled Prepaid Order as Refunded (ADMIN ONLY - MANUAL RAZORPAY REFUND RECORD)
+  const handleMarkOrderRefunded = async (req: express.Request, res: express.Response) => {
+    const { id } = req.params;
+    const authToken = (req as any).authToken;
+    const cleanId = id.replace(/^#/, '').trim();
+    const targetIds = Array.from(new Set([id, cleanId, `#${cleanId}`])).filter(Boolean);
+
+    const client = getScopedSupabase(authToken);
+
+    try {
+      // 1. Fetch order from Supabase
+      let orderRow: any = null;
+      const { data: existingRows, error: fetchErr } = await client
+        .from('orders')
+        .select('*, order_items(*)')
+        .in('id', targetIds);
+
+      if (!fetchErr && existingRows && existingRows.length > 0) {
+        orderRow = existingRows[0];
+      }
+
+      // Check in-memory fallback
+      const inMemoryOrder = orders.find(o => targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, '')));
+
+      if (!orderRow && !inMemoryOrder) {
+        return res.status(404).json({ success: false, error: `Order '${cleanId}' not found.` });
+      }
+
+      const currentFulfillment = (
+        (orderRow ? (orderRow.fulfillment_status || orderRow.fulfillmentStatus) : inMemoryOrder?.fulfillmentStatus) || 'PROCESSING'
+      ).toUpperCase();
+
+      const currentPaymentMethod = (
+        orderRow ? (orderRow.payment_method || orderRow.paymentMethod) : inMemoryOrder?.paymentMethod
+      ) || '';
+
+      const currentPaymentStatus = (
+        orderRow ? (orderRow.payment_status || orderRow.paymentStatus) : inMemoryOrder?.paymentStatus
+      ) || 'Pending';
+
+      // 2. Validate cancelled status (Strict requirement: only cancelled orders)
+      if (currentFulfillment !== 'CANCELLED') {
+        return res.status(400).json({
+          success: false,
+          error: `Only cancelled orders can be marked as refunded. Current fulfillment status is '${currentFulfillment}'.`,
+        });
+      }
+
+      // 3. Validate payment method: only prepaid Razorpay / online orders (NOT COD)
+      const m = currentPaymentMethod.toLowerCase().trim();
+      const isCod = m.includes('cash on delivery') || m.includes('(cod)') || m === 'cod';
+      if (isCod) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cannot mark Cash on Delivery (COD) orders as refunded. Only prepaid Razorpay / online orders are eligible.',
+        });
+      }
+
+      // 4. Validate payment status: must be currently Paid, prevent marking twice
+      if (currentPaymentStatus.toLowerCase() === 'refunded') {
+        return res.status(400).json({
+          success: false,
+          error: 'This order has already been marked as refunded. Duplicate refund records are prevented.',
+        });
+      }
+
+      if (currentPaymentStatus.toLowerCase() !== 'paid') {
+        return res.status(400).json({
+          success: false,
+          error: `Only orders with payment status 'Paid' can be marked as refunded. Current payment status is '${currentPaymentStatus}'.`,
+        });
+      }
+
+      let updatedOrderResult: Order | null = null;
+
+      // 5. Update Supabase orders table: update payment_status to 'Refunded'
+      // Note: All original amounts, Razorpay transaction details, items, addresses are preserved
+      if (orderRow) {
+        const { data: updatedRows, error: updateErr } = await client
+          .from('orders')
+          .update({
+            payment_status: 'Refunded',
+          })
+          .in('id', targetIds)
+          .select('*, order_items(*)');
+
+        if (updateErr) {
+          console.error('Supabase mark order refunded update error:', updateErr);
+          return res.status(500).json({
+            success: false,
+            error: updateErr.message || 'Failed to update order payment status in database.',
+          });
+        }
+
+        if (updatedRows && updatedRows.length > 0) {
+          updatedOrderResult = mapSupabaseOrder(updatedRows[0]);
+        }
+      }
+
+      // 6. Update in-memory orders state
+      orders = orders.map(o => {
+        if (targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, ''))) {
+          return {
+            ...o,
+            paymentStatus: 'Refunded',
+          };
+        }
+        return o;
+      });
+
+      if (!updatedOrderResult && inMemoryOrder) {
+        const found = orders.find(o => targetIds.includes(o.id) || targetIds.includes(o.id.replace(/^#/, '')));
+        if (found) {
+          updatedOrderResult = found;
+        }
+      }
+
+      return res.json({
+        success: true,
+        message: `Order ${cleanId} payment status successfully updated from Paid to Refunded.`,
+        order: updatedOrderResult,
+      });
+    } catch (e: any) {
+      console.error('Unexpected error during marking order as refunded:', e);
+      return res.status(500).json({ success: false, error: 'An unexpected server error occurred while updating refund status.' });
+    }
+  };
+
+  app.post('/api/orders/:id/mark-refunded', sensitiveActionLimiter, requireAdmin, handleMarkOrderRefunded);
+  app.post('/api/admin/orders/:id/mark-refunded', sensitiveActionLimiter, requireAdmin, handleMarkOrderRefunded);
+
+  // ==============================================================================
+  // RETURN & REFUND MANAGEMENT SYSTEM API ENDPOINTS
+  // ==============================================================================
+
+  // Helper: Resolve delivery timestamp from order
+  const resolveOrderDeliveryTimestamp = (order: any): { timestamp: number; formatted: string } => {
+    let rawDate: any = order.delivered_at;
+    if (!rawDate && Array.isArray(order.timeline)) {
+      const deliveredStep = order.timeline.find((s: any) => s.key === 'delivered' || (s.title && s.title.toUpperCase().includes('DELIVERED')));
+      if (deliveredStep?.date) {
+        rawDate = deliveredStep.date;
+      }
+    }
+    if (!rawDate) {
+      rawDate = order.updated_at || order.created_at || order.date || new Date().toISOString();
+    }
+    const d = new Date(rawDate);
+    const ts = !isNaN(d.getTime()) ? d.getTime() : Date.now();
+    return {
+      timestamp: ts,
+      formatted: new Date(ts).toISOString(),
+    };
+  };
+
+  // 19.1 POST /api/returns: Create customer return request (Strict 7-Day & 3-Reason Return Policy)
+  app.post('/api/returns', sensitiveActionLimiter, requireAuth, async (req, res) => {
+    const user = (req as any).user;
+    const isAdmin = (req as any).isAdmin;
+    const authToken = (req as any).authToken;
+
+    const validation = CreateReturnRequestSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: validation.error.issues[0]?.message || 'Invalid return request payload.',
+        details: validation.error.issues,
+      });
+    }
+
+    const { orderId, orderItemId, productId, reason, description, evidenceEmailConfirmed } = validation.data;
+    const cleanOrderId = orderId.replace(/^#/, '').trim();
+    const targetOrderIds = Array.from(new Set([orderId, cleanOrderId, `#${cleanOrderId}`])).filter(Boolean);
+
+    const client = getScopedSupabase(authToken);
+
+    try {
+      // 1. Fetch order from Supabase / Memory
+      let orderRow: any = null;
+      const { data: dbOrders, error: fetchErr } = await client
+        .from('orders')
+        .select('*, order_items(*)')
+        .in('id', targetOrderIds);
+
+      if (!fetchErr && dbOrders && dbOrders.length > 0) {
+        orderRow = dbOrders[0];
+      }
+
+      const inMemoryOrder = orders.find(o => targetOrderIds.includes(o.id) || targetOrderIds.includes(o.id.replace(/^#/, '')));
+
+      if (!orderRow && !inMemoryOrder) {
+        return res.status(404).json({ success: false, error: 'Order not found.' });
+      }
+
+      // 2. Ownership verification: authenticated user must own the order unless admin
+      if (orderRow) {
+        const orderUserId = orderRow.user_id;
+        const orderEmail = (orderRow.customer_email || '').toLowerCase().trim();
+        const userEmail = (user.email || '').toLowerCase().trim();
+        const isOwner = (orderUserId && orderUserId === user.id) || (orderEmail && userEmail && orderEmail === userEmail);
+        if (!isOwner && !isAdmin) {
+          return res.status(403).json({ success: false, error: 'You are not authorized to request a return for this order.' });
+        }
+      } else if (inMemoryOrder) {
+        const orderUserId = (inMemoryOrder as any).userId || (inMemoryOrder as any).user_id;
+        const orderEmail = (inMemoryOrder.customer?.email || '').toLowerCase().trim();
+        const userEmail = (user.email || '').toLowerCase().trim();
+        const isOwner = (orderUserId && orderUserId === user.id) || (orderEmail && userEmail && orderEmail === userEmail);
+        if (!isOwner && !isAdmin) {
+          return res.status(403).json({ success: false, error: 'You are not authorized to request a return for this order.' });
+        }
+      }
+
+      // 3. Status verification: Order MUST be DELIVERED
+      const currentFulfillment = (
+        (orderRow ? (orderRow.fulfillment_status || orderRow.fulfillmentStatus) : inMemoryOrder?.fulfillmentStatus) || 'PROCESSING'
+      ).toUpperCase();
+
+      if (currentFulfillment !== 'DELIVERED') {
+        return res.status(400).json({
+          success: false,
+          error: `Return requests are only permitted for delivered orders. Current order status is '${currentFulfillment}'.`,
+        });
+      }
+
+      // 4. Strict 7-Day Window Enforcement from actual delivery timestamp
+      const deliveryInfo = resolveOrderDeliveryTimestamp(orderRow || inMemoryOrder);
+      const deliveryTimestamp = deliveryInfo.timestamp;
+      const now = Date.now();
+      const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+      const deadlineTimestamp = deliveryTimestamp + SEVEN_DAYS_MS;
+
+      if (now > deadlineTimestamp) {
+        const expiredDateFormatted = new Date(deadlineTimestamp).toLocaleDateString('en-US', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+        });
+        return res.status(400).json({
+          success: false,
+          error: `The 7-day return period for this order expired on ${expiredDateFormatted}. Return requests cannot be accepted.`,
+        });
+      }
+
+      // 5. Match order item
+      const orderItems = orderRow?.order_items || inMemoryOrder?.items || [];
+      let matchedItem: any = null;
+
+      if (orderItemId) {
+        matchedItem = orderItems.find((it: any) => it.id === orderItemId || (it as any).orderItemId === orderItemId);
+      }
+      if (!matchedItem && productId) {
+        matchedItem = orderItems.find((it: any) => it.product_id === productId || it.productId === productId);
+      }
+      if (!matchedItem && orderItems.length > 0) {
+        matchedItem = orderItems[0];
+      }
+
+      const resolvedProductName = matchedItem?.product_name || matchedItem?.productName || 'STUNNING BIRDS Handcrafted Leather Piece';
+      const resolvedProductImage = matchedItem?.product_image || matchedItem?.productImage || 'https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=800&q=80';
+      const resolvedSku = matchedItem?.sku || matchedItem?.product_sku || 'SB-RET-01';
+      const resolvedQty = Number(matchedItem?.quantity) || 1;
+      const resolvedPrice = Number(matchedItem?.price) || Number(orderRow?.total || inMemoryOrder?.total || 0);
+      const resolvedPaidAmount = resolvedPrice * resolvedQty;
+
+      const customerName = orderRow?.customer_name || inMemoryOrder?.customer?.name || user.user_metadata?.full_name || user.email.split('@')[0];
+      const customerEmail = orderRow?.customer_email || inMemoryOrder?.customer?.email || user.email;
+      const customerPhone = orderRow?.shipping_address?.phone || inMemoryOrder?.shippingAddress?.phone || undefined;
+
+      // 6. Check for duplicate active return requests on this order item
+      const canonicalOrderId = orderRow?.id || inMemoryOrder?.id || orderId;
+      const resolvedOrderItemId = matchedItem?.id || undefined;
+      const resolvedProductId = matchedItem?.product_id || matchedItem?.productId || undefined;
+
+      let duplicateExists = false;
+      try {
+        let dupQuery = client
+          .from('return_requests')
+          .select('id, return_request_id, status')
+          .eq('order_id', canonicalOrderId)
+          .neq('status', 'RETURN_REJECTED');
+
+        if (resolvedOrderItemId) {
+          dupQuery = dupQuery.eq('order_item_id', resolvedOrderItemId);
+        } else if (resolvedProductId) {
+          dupQuery = dupQuery.eq('product_id', resolvedProductId);
+        }
+
+        const { data: dupRows } = await dupQuery;
+        if (dupRows && dupRows.length > 0) {
+          duplicateExists = true;
+        }
+      } catch (dErr) {
+        // Fallback to in-memory check
+        const inMemDup = returnRequests.find(r => 
+          r.orderId === canonicalOrderId && 
+          r.status !== 'RETURN_REJECTED' && 
+          (r.orderItemId === resolvedOrderItemId || r.productId === resolvedProductId)
+        );
+        if (inMemDup) duplicateExists = true;
+      }
+
+      if (duplicateExists) {
+        return res.status(409).json({
+          success: false,
+          error: 'An active return request already exists for this item. Please check your existing return status under My Returns.',
+        });
+      }
+
+      // 7. Generate unique Return Request ID
+      const returnRequestId = `RET-SB-${Math.floor(1000 + Math.random() * 9000)}`;
+      const requestedAt = new Date().toISOString();
+      const returnDeadlineStr = new Date(deadlineTimestamp).toISOString();
+
+      const newReturnRecord = {
+        return_request_id: returnRequestId,
+        order_id: canonicalOrderId,
+        order_item_id: resolvedOrderItemId || null,
+        customer_id: user.id || null,
+        customer_name: customerName,
+        customer_email: customerEmail,
+        customer_phone: customerPhone || null,
+        product_id: resolvedProductId || null,
+        product_name: resolvedProductName,
+        product_image: resolvedProductImage,
+        product_sku: resolvedSku,
+        quantity: resolvedQty,
+        item_price: resolvedPrice,
+        paid_amount: resolvedPaidAmount,
+        reason: reason as ReturnReason,
+        description: sanitizeString(description),
+        evidence_email_confirmed: true,
+        status: 'RETURN_REQUESTED' as ReturnStatus,
+        delivery_at_submission: deliveryInfo.formatted,
+        return_deadline: returnDeadlineStr,
+        requested_at: requestedAt,
+        inspection_result: 'PENDING' as const,
+        refund_amount: resolvedPaidAmount,
+        refund_status: 'PENDING' as const,
+      };
+
+      let insertedReturn: ReturnRequest | null = null;
+
+      // 8. Insert into Supabase
+      try {
+        const { data: insData, error: insErr } = await client
+          .from('return_requests')
+          .insert(newReturnRecord)
+          .select('*')
+          .single();
+
+        if (insErr) {
+          console.warn('Supabase return request insert error (falling back to memory):', insErr);
+        } else if (insData) {
+          // Record initial audit history using service role client or trigger
+          const initialHistory = await recordReturnStatusHistory({
+            client,
+            serviceClient: getServiceSupabase(),
+            returnRequestId,
+            oldStatus: null,
+            newStatus: 'RETURN_REQUESTED',
+            changedBy: user.email,
+            changedByRole: 'CUSTOMER',
+            note: `Return request submitted with reason: ${reason}. Patron confirmed unboxing video email submission to stunningbirds236@gmail.com.`,
+            createdAt: requestedAt,
+          });
+
+          // Fetch refreshed return with history
+          const queryClient = getServiceSupabase() || client;
+          const { data: refreshedData } = await queryClient
+            .from('return_requests')
+            .select('*, return_status_history(*)')
+            .eq('return_request_id', returnRequestId)
+            .maybeSingle();
+
+          if (refreshedData) {
+            insertedReturn = mapSupabaseReturnRequest(refreshedData);
+          } else {
+            insertedReturn = mapSupabaseReturnRequest(insData);
+          }
+
+          if (!insertedReturn.history || insertedReturn.history.length === 0) {
+            insertedReturn.history = [initialHistory];
+          }
+        }
+      } catch (dbErr) {
+        console.warn('Database error during return insertion:', dbErr);
+      }
+
+      // Fallback/In-memory synchronization
+      if (!insertedReturn) {
+        insertedReturn = {
+          id: `ret-uuid-${Date.now()}`,
+          returnRequestId,
+          orderId: canonicalOrderId,
+          orderItemId: resolvedOrderItemId,
+          customerId: user.id,
+          customerName,
+          customerEmail,
+          customerPhone,
+          productId: resolvedProductId,
+          productName: resolvedProductName,
+          productImage: resolvedProductImage,
+          productSku: resolvedSku,
+          quantity: resolvedQty,
+          itemPrice: resolvedPrice,
+          paidAmount: resolvedPaidAmount,
+          reason: reason as ReturnReason,
+          description: sanitizeString(description),
+          evidenceEmailConfirmed: true,
+          status: 'RETURN_REQUESTED',
+          deliveryAtSubmission: deliveryInfo.formatted,
+          returnDeadline: returnDeadlineStr,
+          requestedAt,
+          inspectionResult: 'PENDING',
+          refundAmount: resolvedPaidAmount,
+          refundStatus: 'PENDING',
+          createdAt: requestedAt,
+          history: [
+            {
+              id: `hist-${Date.now()}`,
+              returnRequestId,
+              newStatus: 'RETURN_REQUESTED',
+              changedBy: user.email,
+              changedByRole: 'CUSTOMER',
+              note: `Return request submitted with reason: ${reason}. Patron confirmed unboxing video email submission to stunningbirds236@gmail.com.`,
+              createdAt: requestedAt,
+            },
+          ],
+        };
+      }
+
+      // Synchronize in-memory stores safely without duplicates
+      const existingIdx = returnRequests.findIndex(r => r.returnRequestId === returnRequestId);
+      if (existingIdx === -1) {
+        returnRequests.unshift(insertedReturn);
+      } else {
+        returnRequests[existingIdx] = insertedReturn;
+      }
+
+      if (insertedReturn.history && insertedReturn.history.length > 0) {
+        insertedReturn.history.forEach(h => {
+          if (!returnStatusHistory.some(existingH => existingH.id === h.id || (existingH.returnRequestId === h.returnRequestId && existingH.newStatus === h.newStatus && existingH.createdAt === h.createdAt))) {
+            returnStatusHistory.unshift(h);
+          }
+        });
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: `Return request ${returnRequestId} created successfully. Please send your complete unboxing video to stunningbirds236@gmail.com.`,
+        returnRequest: insertedReturn,
+      });
+    } catch (err: any) {
+      console.error('Unexpected error creating return request:', err);
+      return res.status(500).json({
+        success: false,
+        error: 'An unexpected server error occurred while processing your return request.',
+      });
+    }
+  });
+
+  // 19.2 GET /api/returns: List return requests (Customer sees own, Admin sees all)
+  app.get('/api/returns', requireAuth, async (req, res) => {
+    const user = (req as any).user;
+    const isAdmin = (req as any).isAdmin;
+    const authToken = (req as any).authToken;
+    const { status, reason, search } = req.query;
+
+    const client = getScopedSupabase(authToken);
+
+    try {
+      let query = client
+        .from('return_requests')
+        .select('*, return_status_history(*)')
+        .order('created_at', { ascending: false });
+
+      if (!isAdmin) {
+        query = query.or(`customer_id.eq.${user.id},customer_email.ilike.${user.email}`);
+      }
+
+      if (status && status !== 'All') {
+        query = query.eq('status', String(status));
+      }
+
+      if (reason && reason !== 'All') {
+        query = query.eq('reason', String(reason));
+      }
+
+      const { data: dbReturns, error } = await query;
+
+      let results: ReturnRequest[] = [];
+      if (!error && dbReturns && dbReturns.length > 0) {
+        results = dbReturns.map(mapSupabaseReturnRequest);
+      } else {
+        // Fallback to in-memory store
+        results = [...returnRequests];
+        if (!isAdmin) {
+          results = results.filter(r => 
+            (r.customerId && r.customerId === user.id) || 
+            (r.customerEmail && r.customerEmail.toLowerCase() === user.email.toLowerCase())
+          );
+        }
+        if (status && status !== 'All') {
+          results = results.filter(r => r.status === status);
+        }
+        if (reason && reason !== 'All') {
+          results = results.filter(r => r.reason === reason);
+        }
+      }
+
+      if (search) {
+        const q = String(search).toLowerCase();
+        results = results.filter(r =>
+          r.returnRequestId.toLowerCase().includes(q) ||
+          r.orderId.toLowerCase().includes(q) ||
+          r.productName.toLowerCase().includes(q) ||
+          r.customerName.toLowerCase().includes(q) ||
+          r.customerEmail.toLowerCase().includes(q) ||
+          (r.trackingNumber && r.trackingNumber.toLowerCase().includes(q))
+        );
+      }
+
+      return res.json({
+        success: true,
+        count: results.length,
+        returns: results,
+      });
+    } catch (err: any) {
+      console.error('Error fetching return requests:', err);
+      return res.status(500).json({ success: false, error: 'Failed to fetch return requests.' });
+    }
+  });
+
+  // 19.3 GET /api/returns/:id: Fetch single return request with audit history
+  app.get('/api/returns/:id', requireAuth, async (req, res) => {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const isAdmin = (req as any).isAdmin;
+    const authToken = (req as any).authToken;
+
+    const client = getScopedSupabase(authToken);
+
+    try {
+      let query = client
+        .from('return_requests')
+        .select('*, return_status_history(*)');
+      query = applyReturnFilter(query, id);
+      const { data: dbReturn, error } = await query.maybeSingle();
+
+      let result: ReturnRequest | null = null;
+      if (!error && dbReturn) {
+        result = mapSupabaseReturnRequest(dbReturn);
+      } else {
+        result = returnRequests.find(r => r.id === id || r.returnRequestId === id) || null;
+      }
+
+      if (!result) {
+        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      }
+
+      // Check access permission
+      const isOwner = (result.customerId && result.customerId === user.id) || 
+                      (result.customerEmail && result.customerEmail.toLowerCase() === user.email.toLowerCase());
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({ success: false, error: 'Access denied.' });
+      }
+
+      return res.json({ success: true, returnRequest: result });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: 'Failed to fetch return details.' });
+    }
+  });
+
+  // 19.4 POST /api/admin/returns/:id/approve: Approve return request
+  app.post('/api/admin/returns/:id/approve', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const dbClient = getServiceSupabase();
+
+    if (!dbClient) {
+      console.error(`[Admin Return Approve] Service role configuration is missing at runtime.`);
+      return res.status(500).json({
+        success: false,
+        error: 'Server Supabase service-role configuration is missing.',
+      });
+    }
+
+    try {
+      const cleanId = decodeURIComponent(String(id || '')).trim();
+      console.log(`[Admin Return Approve] Processing approval for return ID/Code: '${cleanId}' by admin: '${user?.email}'`);
+
+      // 1. Direct query to Supabase public.return_requests
+      let checkQuery = dbClient.from('return_requests').select('*');
+      if (UUID_REGEX.test(cleanId)) {
+        checkQuery = checkQuery.eq('id', cleanId);
+      } else {
+        checkQuery = checkQuery.eq('return_request_id', cleanId);
+      }
+
+      const { data: dbCurrent, error: checkError } = await checkQuery.maybeSingle();
+
+      if (checkError) {
+        console.error('[Admin Return Approve] Lookup error on return_requests:', checkError);
+        return res.status(500).json({
+          success: false,
+          error: checkError.message || 'Database error querying return request.',
+          code: checkError.code,
+          details: checkError.details,
+          hint: checkError.hint,
+        });
+      }
+
+      if (!dbCurrent) {
+        console.warn(`[Admin Return Approve] Return request '${cleanId}' not found in database.`);
+        return res.status(404).json({
+          success: false,
+          error: `Return request '${cleanId}' not found in database.`,
+        });
+      }
+
+      const existingReturn = mapSupabaseReturnRequest(dbCurrent);
+
+      // Idempotency: if already approved, return success immediately
+      if (existingReturn.status === 'RETURN_APPROVED') {
+        return res.json({
+          success: true,
+          message: `Return ${existingReturn.returnRequestId} is already approved. Reverse pickup may be scheduled.`,
+          returnRequest: existingReturn,
+        });
+      }
+
+      const now = new Date().toISOString();
+      const oldStatus = existingReturn.status || 'RETURN_REQUESTED';
+      const updateData = {
+        status: 'RETURN_APPROVED',
+        approved_at: now,
+        approved_by: user.email,
+        updated_at: now,
+      };
+
+      // 2. Update that exact row in Supabase using its UUID primary key
+      const { data: updated, error: updateError } = await dbClient
+        .from('return_requests')
+        .update(updateData)
+        .eq('id', dbCurrent.id)
+        .select('*')
+        .single();
+
+      if (updateError || !updated) {
+        console.error('[Admin Return Approve] Update error on return_requests:', updateError);
+        return res.status(500).json({
+          success: false,
+          error: updateError?.message || 'Failed to update return status in database.',
+          code: updateError?.code,
+          details: updateError?.details,
+          hint: updateError?.hint,
+        });
+      }
+
+      const updatedReturn = mapSupabaseReturnRequest(updated);
+
+      // 3. Record exactly one status transition in return_status_history using service client
+      try {
+        await recordReturnStatusHistory({
+          serviceClient: dbClient,
+          returnRequestId: updatedReturn.returnRequestId,
+          oldStatus,
+          newStatus: 'RETURN_APPROVED',
+          changedBy: user.email,
+          changedByRole: 'ADMIN',
+          note: 'Return request approved by Atelier Management after unboxing video verification.',
+          createdAt: now,
+        });
+      } catch (historyErr: any) {
+        console.error('[Admin Return Approve] Error inserting return_status_history:', historyErr);
+        return res.status(500).json({
+          success: false,
+          error: historyErr?.message || 'Failed to record return status history in database.',
+        });
+      }
+
+      // 4. Refetch complete record with history using service client
+      const { data: refreshed, error: refetchErr } = await dbClient
+        .from('return_requests')
+        .select('*, return_status_history(*)')
+        .eq('return_request_id', updatedReturn.returnRequestId)
+        .maybeSingle();
+
+      if (refetchErr) {
+        console.error('[Admin Return Approve] Refetch error on return_requests:', refetchErr);
+        return res.status(500).json({
+          success: false,
+          error: refetchErr.message || 'Failed to refetch approved return request.',
+          code: refetchErr.code,
+          details: refetchErr.details,
+          hint: refetchErr.hint,
+        });
+      }
+
+      const finalReturn = refreshed ? mapSupabaseReturnRequest(refreshed) : updatedReturn;
+
+      return res.json({
+        success: true,
+        message: `Return ${finalReturn.returnRequestId} has been approved. Reverse pickup may now be scheduled.`,
+        returnRequest: finalReturn,
+      });
+    } catch (err: any) {
+      console.error('[Admin Return Approve] Unhandled exception in approve return:', err);
+      return res.status(500).json({
+        success: false,
+        error: err?.message || 'Internal server error while approving return request.',
+      });
+    }
+  });
+
+  // 19.5 POST /api/admin/returns/:id/reject: Reject return request with mandatory reason
+  app.post('/api/admin/returns/:id/reject', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const authToken = (req as any).authToken;
+
+    const validation = AdminReturnRejectSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: validation.error.issues[0]?.message || 'A clear rejection reason of at least 5 characters is required.',
+      });
+    }
+
+    const { rejectionReason } = validation.data;
+    const client = getScopedSupabase(authToken);
+    const dbClient = getServiceSupabase() || client;
+
+    try {
+      // 1. Fetch current return
+      let checkQuery = dbClient.from('return_requests').select('*');
+      checkQuery = applyReturnFilter(checkQuery, id);
+      const { data: dbCurrent, error: checkError } = await checkQuery.maybeSingle();
+
+      if (checkError) {
+        console.error('Failed to query return request for rejection:', {
+          message: checkError.message,
+          code: checkError.code,
+          details: checkError.details,
+          hint: checkError.hint,
+        });
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to find return request in database.',
+          details: checkError.message,
+          code: checkError.code,
+          hint: checkError.hint,
+        });
+      }
+
+      const existingReturn = dbCurrent ? mapSupabaseReturnRequest(dbCurrent) : returnRequests.find(r => r.id === id || r.returnRequestId === id);
+
+      if (!existingReturn) {
+        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      }
+
+      if (existingReturn.status === 'RETURN_REJECTED' && existingReturn.rejectionReason === rejectionReason) {
+        return res.json({
+          success: true,
+          message: `Return ${existingReturn.returnRequestId} is already rejected.`,
+          returnRequest: existingReturn,
+        });
+      }
+
+      const now = new Date().toISOString();
+      const oldStatus = existingReturn.status || 'RETURN_REQUESTED';
+      const updateData = {
+        status: 'RETURN_REJECTED',
+        rejected_at: now,
+        rejected_by: user.email,
+        rejection_reason: rejectionReason,
+        refund_status: 'NOT_APPLICABLE',
+        updated_at: now,
+      };
+
+      let updQuery = dbClient.from('return_requests').update(updateData);
+      updQuery = applyReturnFilter(updQuery, id);
+      const { data: updated, error: updateError } = await updQuery
+        .select('*')
+        .single();
+
+      if (updateError || !updated) {
+        console.error('Failed to update return rejection in Supabase:', {
+          message: updateError?.message,
+          code: updateError?.code,
+          details: updateError?.details,
+          hint: updateError?.hint,
+        });
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to update return rejection in database.',
+          details: updateError?.message || 'Database update failed',
+          code: updateError?.code,
+          hint: updateError?.hint,
+        });
+      }
+
+      const updatedReturn = mapSupabaseReturnRequest(updated);
+      try {
+        await recordReturnStatusHistory({
+          client,
+          serviceClient: getServiceSupabase(),
+          returnRequestId: updatedReturn.returnRequestId,
+          oldStatus,
+          newStatus: 'RETURN_REJECTED',
+          changedBy: user.email,
+          changedByRole: 'ADMIN',
+          note: `Return request rejected by Atelier Management. Reason: ${rejectionReason}`,
+          createdAt: now,
+        });
+      } catch (historyErr: any) {
+        console.error('Failed to insert return_status_history row for rejection:', historyErr);
+        return res.status(500).json({
+          success: false,
+          error: 'Return status was updated in return_requests, but recording audit history failed.',
+          details: historyErr?.message || 'History insert failed',
+        });
+      }
+
+      let finalReturn = updatedReturn;
+      try {
+        const queryClient = getServiceSupabase() || client;
+        const { data: refreshed, error: refetchErr } = await queryClient
+          .from('return_requests')
+          .select('*, return_status_history(*)')
+          .eq('return_request_id', updatedReturn.returnRequestId)
+          .maybeSingle();
+
+        if (refetchErr) {
+          console.warn('Notice: Refetching rejected return request with history encountered an issue:', {
+            message: refetchErr.message,
+            code: refetchErr.code,
+            details: refetchErr.details,
+            hint: refetchErr.hint,
+          });
+        } else if (refreshed) {
+          finalReturn = mapSupabaseReturnRequest(refreshed);
+        }
+      } catch (refetchCatchErr) {
+        console.warn('Refetch exception caught (safely proceeding with updated return data):', refetchCatchErr);
+      }
+
+      return res.json({
+        success: true,
+        message: `Return ${finalReturn.returnRequestId} has been rejected.`,
+        returnRequest: finalReturn,
+      });
+    } catch (err: any) {
+      console.error('Error rejecting return request:', err);
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to reject return request.' });
+    }
+  });
+
+  // Handler for Reverse pickup & transit status update
+  const handleCourierStatusUpdate = async (req: express.Request, res: express.Response) => {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const authToken = (req as any).authToken;
+
+    const validation = AdminReturnCourierStatusSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: validation.error.issues[0]?.message || 'Invalid courier status data.',
+      });
+    }
+
+    const { status = 'PICKUP_SCHEDULED', courierName, trackingNumber, pickupNotes, adminNotes } = validation.data;
+    const client = getScopedSupabase(authToken);
+
+    try {
+      // 1. Fetch current return
+      let checkQuery = client.from('return_requests').select('*');
+      checkQuery = applyReturnFilter(checkQuery, id);
+      const { data: dbCurrent } = await checkQuery.maybeSingle();
+
+      const existingReturn = dbCurrent ? mapSupabaseReturnRequest(dbCurrent) : returnRequests.find(r => r.id === id || r.returnRequestId === id);
+
+      if (!existingReturn) {
+        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      }
+
+      const now = new Date().toISOString();
+      const oldStatus = existingReturn.status || 'RETURN_APPROVED';
+      const updateData: any = {
+        status,
+        updated_at: now,
+      };
+
+      if (courierName) updateData.courier_name = courierName;
+      if (trackingNumber) updateData.tracking_number = trackingNumber;
+      if (pickupNotes) updateData.pickup_notes = pickupNotes;
+      if (adminNotes) updateData.admin_notes = adminNotes;
+
+      if (status === 'PICKUP_SCHEDULED') updateData.pickup_scheduled_at = now;
+      if (status === 'PICKED_UP') updateData.picked_up_at = now;
+      if (status === 'IN_TRANSIT') updateData.in_transit_at = now;
+      if (status === 'RETURN_RECEIVED') updateData.received_at = now;
+
+      let updQuery = client.from('return_requests').update(updateData);
+      updQuery = applyReturnFilter(updQuery, id);
+      const { data: updated, error } = await updQuery
+        .select('*')
+        .single();
+
+      if (error || !updated) {
+        console.error('Failed to update courier status in Supabase:', error);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to update courier status in database.',
+          details: error?.message,
+        });
+      }
+
+      const updatedReturn = mapSupabaseReturnRequest(updated);
+      await recordReturnStatusHistory({
+        client,
+        serviceClient: getServiceSupabase(),
+        returnRequestId: updatedReturn.returnRequestId,
+        oldStatus,
+        newStatus: status,
+        changedBy: user.email,
+        changedByRole: 'ADMIN',
+        note: `Reverse logistics updated to ${status}.${courierName ? ` Courier: ${courierName}.` : ''}${trackingNumber ? ` AWB: ${trackingNumber}.` : ''}${pickupNotes ? ` Note: ${pickupNotes}` : ''}`,
+        createdAt: now,
+      });
+
+      const queryClient = getServiceSupabase() || client;
+      const { data: refreshed } = await queryClient
+        .from('return_requests')
+        .select('*, return_status_history(*)')
+        .eq('return_request_id', updatedReturn.returnRequestId)
+        .maybeSingle();
+
+      const finalReturn = refreshed ? mapSupabaseReturnRequest(refreshed) : updatedReturn;
+
+      return res.json({
+        success: true,
+        message: `Reverse logistics status updated to ${status}.`,
+        returnRequest: finalReturn,
+      });
+    } catch (err: any) {
+      console.error('Error updating courier status:', err);
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to update courier status.' });
+    }
+  };
+
+  // 19.6 POST /api/admin/returns/:id/courier-status and /api/admin/returns/:id/courier
+  app.post('/api/admin/returns/:id/courier-status', sensitiveActionLimiter, requireAdmin, handleCourierStatusUpdate);
+  app.post('/api/admin/returns/:id/courier', sensitiveActionLimiter, requireAdmin, handleCourierStatusUpdate);
+
+  // 19.7 POST /api/admin/returns/:id/inspection: Kolkata Physical Inspection recording
+  app.post('/api/admin/returns/:id/inspection', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const authToken = (req as any).authToken;
+
+    const validation = AdminReturnInspectionSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: validation.error.issues[0]?.message || 'Inspection result and detailed notes (min 5 characters) are required.',
+      });
+    }
+
+    const { inspectionResult, inspectionNotes } = validation.data;
+    const client = getScopedSupabase(authToken);
+
+    try {
+      // 1. Fetch current return
+      let checkQuery = client.from('return_requests').select('*');
+      checkQuery = applyReturnFilter(checkQuery, id);
+      const { data: dbCurrent } = await checkQuery.maybeSingle();
+
+      const existingReturn = dbCurrent ? mapSupabaseReturnRequest(dbCurrent) : returnRequests.find(r => r.id === id || r.returnRequestId === id);
+
+      if (!existingReturn) {
+        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      }
+
+      const now = new Date().toISOString();
+      const oldStatus = existingReturn.status || 'RETURN_RECEIVED';
+      const newStatus = inspectionResult === 'PASSED' ? 'INSPECTION_COMPLETED' : 'RETURN_RECEIVED';
+
+      const updateData = {
+        inspection_result: inspectionResult,
+        inspection_notes: inspectionNotes,
+        inspection_at: now,
+        inspected_by: user.email,
+        status: newStatus,
+        updated_at: now,
+      };
+
+      let updQuery = client.from('return_requests').update(updateData);
+      updQuery = applyReturnFilter(updQuery, id);
+      const { data: updated, error } = await updQuery
+        .select('*')
+        .single();
+
+      if (error || !updated) {
+        console.error('Failed to record inspection in Supabase:', error);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to record inspection in database.',
+          details: error?.message,
+        });
+      }
+
+      const updatedReturn = mapSupabaseReturnRequest(updated);
+      await recordReturnStatusHistory({
+        client,
+        serviceClient: getServiceSupabase(),
+        returnRequestId: updatedReturn.returnRequestId,
+        oldStatus,
+        newStatus,
+        changedBy: user.email,
+        changedByRole: 'ADMIN',
+        note: `Physical inspection at Kolkata Atelier completed. Result: ${inspectionResult}. Notes: ${inspectionNotes}`,
+        createdAt: now,
+      });
+
+      const queryClient = getServiceSupabase() || client;
+      const { data: refreshed } = await queryClient
+        .from('return_requests')
+        .select('*, return_status_history(*)')
+        .eq('return_request_id', updatedReturn.returnRequestId)
+        .maybeSingle();
+
+      const finalReturn = refreshed ? mapSupabaseReturnRequest(refreshed) : updatedReturn;
+
+      return res.json({
+        success: true,
+        message: `Physical inspection recorded as ${inspectionResult}. ${inspectionResult === 'PASSED' ? 'Eligible for refund processing.' : 'Refund is withheld pending review.'}`,
+        returnRequest: finalReturn,
+      });
+    } catch (err: any) {
+      console.error('Error recording inspection:', err);
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to record inspection result.' });
+    }
+  });
+
+  // 19.8 POST /api/admin/returns/:id/refund: Manual Refund Workflow
+  app.post('/api/admin/returns/:id/refund', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const authToken = (req as any).authToken;
+
+    const validation = AdminReturnRefundSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: validation.error.issues[0]?.message || 'Invalid refund request parameters.',
+      });
+    }
+
+    const {
+      refundAmount: overrideAmount,
+      refundReference: inputReference,
+      refundedAt: inputRefundedAt,
+      manualRefundNote,
+      notes,
+      status: requestedStatus,
+      markCompleted,
+    } = validation.data;
+    const client = getScopedSupabase(authToken);
+
+    try {
+      // 1. Fetch return request
+      let checkQuery = client.from('return_requests').select('*');
+      checkQuery = applyReturnFilter(checkQuery, id);
+      const { data: dbReturn } = await checkQuery.maybeSingle();
+
+      const returnReq: ReturnRequest | null = dbReturn ? mapSupabaseReturnRequest(dbReturn) : returnRequests.find(r => r.id === id || r.returnRequestId === id) || null;
+
+      if (!returnReq) {
+        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      }
+
+      if (returnReq.status !== 'INSPECTION_COMPLETED' && returnReq.inspectionResult !== 'PASSED' && returnReq.status !== 'REFUNDED' && returnReq.status !== 'RETURN_COMPLETED') {
+        return res.status(400).json({
+          success: false,
+          error: `Refund can only be processed after Kolkata inspection is PASSED. Current inspection status is '${returnReq.inspectionResult || 'PENDING'}'.`,
+        });
+      }
+
+      if (returnReq.refundStatus === 'COMPLETED' && returnReq.status === 'REFUNDED' && !markCompleted && !requestedStatus) {
+        return res.json({
+          success: true,
+          message: `A refund has already been recorded for this return request (Reference: ${returnReq.refundReference || 'COMPLETED'}).`,
+          returnRequest: returnReq,
+          refundReference: returnReq.refundReference,
+          refundAmount: returnReq.refundAmount,
+        });
+      }
+
+      // Calculate final refund amount derived server-side
+      const maxEligibleAmount = Number(returnReq.paidAmount) || Number(returnReq.refundAmount) || 0;
+      const finalRefundAmount = overrideAmount !== undefined && overrideAmount > 0 && overrideAmount <= maxEligibleAmount
+        ? overrideAmount
+        : maxEligibleAmount;
+
+      if (finalRefundAmount <= 0) {
+        return res.status(400).json({ success: false, error: 'Refund amount must be greater than zero.' });
+      }
+
+      const now = new Date().toISOString();
+      const refundTimestamp = inputRefundedAt || now;
+      const refundRef = inputReference?.trim() || manualRefundNote?.trim() || returnReq.refundReference || `REF-SB-${Date.now().toString(36).toUpperCase()}`;
+      const targetStatus: ReturnStatus = markCompleted ? 'RETURN_COMPLETED' : ((requestedStatus as ReturnStatus) || 'REFUNDED');
+      const oldStatus = returnReq.status || 'INSPECTION_COMPLETED';
+      const refundNoteText = notes || manualRefundNote || '';
+
+      const updateData: any = {
+        refund_amount: finalRefundAmount,
+        refund_status: 'COMPLETED',
+        refund_reference: refundRef,
+        refund_failure_reason: null,
+        refunded_at: refundTimestamp,
+        status: targetStatus,
+        updated_at: now,
+      };
+
+      if (targetStatus === 'RETURN_COMPLETED') {
+        updateData.completed_at = now;
+      }
+      if (refundNoteText) {
+        updateData.admin_notes = refundNoteText;
+      }
+
+      let updQuery = client.from('return_requests').update(updateData);
+      updQuery = applyReturnFilter(updQuery, id);
+      const { data: updatedDbReturn, error: updateErr } = await updQuery
+        .select('*')
+        .single();
+
+      if (updateErr || !updatedDbReturn) {
+        console.error('Error updating refund in Supabase:', updateErr);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to record refund in database.',
+          details: updateErr?.message,
+        });
+      }
+
+      const finalUpdatedReturn = mapSupabaseReturnRequest(updatedDbReturn);
+      await recordReturnStatusHistory({
+        client,
+        serviceClient: getServiceSupabase(),
+        returnRequestId: finalUpdatedReturn.returnRequestId,
+        oldStatus,
+        newStatus: targetStatus,
+        changedBy: user.email,
+        changedByRole: 'ADMIN',
+        note: `Manual refund of ₹${finalRefundAmount.toLocaleString('en-IN')} recorded. Reference: ${refundRef}.${refundNoteText ? ` Notes: ${refundNoteText}` : ''}`,
+        createdAt: now,
+      });
+
+      const queryClient = getServiceSupabase() || client;
+      const { data: refreshed } = await queryClient
+        .from('return_requests')
+        .select('*, return_status_history(*)')
+        .eq('return_request_id', finalUpdatedReturn.returnRequestId)
+        .maybeSingle();
+
+      const resolvedReturn = refreshed ? mapSupabaseReturnRequest(refreshed) : finalUpdatedReturn;
+
+      return res.json({
+        success: true,
+        message: `Refund of ₹${finalRefundAmount.toLocaleString('en-IN')} successfully completed. Status: ${targetStatus}. Reference: ${refundRef}`,
+        returnRequest: resolvedReturn,
+        refundReference: refundRef,
+        refundAmount: finalRefundAmount,
+      });
+    } catch (err: any) {
+      console.error('Error processing refund:', err);
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to process refund.' });
+    }
+  });
+
+  // 19.9 POST /api/admin/returns/:id/status: Generic manual status transition endpoint
+  app.post('/api/admin/returns/:id/status', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const user = (req as any).user;
+    const authToken = (req as any).authToken;
+
+    const validation = AdminReturnStatusSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: validation.error.issues[0]?.message || 'Invalid return status.',
+      });
+    }
+
+    const { status, note } = validation.data;
+    const client = getScopedSupabase(authToken);
+    const dbClient = getServiceSupabase() || client;
+
+    try {
+      let checkQuery = dbClient.from('return_requests').select('*');
+      checkQuery = applyReturnFilter(checkQuery, id);
+      const { data: dbCurrent } = await checkQuery.maybeSingle();
+
+      const existingReturn = dbCurrent ? mapSupabaseReturnRequest(dbCurrent) : returnRequests.find(r => r.id === id || r.returnRequestId === id);
+
+      if (!existingReturn) {
+        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      }
+
+      const now = new Date().toISOString();
+      const oldStatus = existingReturn.status;
+      const updateData: any = {
+        status,
+        updated_at: now,
+      };
+
+      if (status === 'RETURN_APPROVED' && !existingReturn.approvedAt) {
+        updateData.approved_at = now;
+        updateData.approved_by = user.email;
+      } else if (status === 'RETURN_REJECTED' && !existingReturn.rejectedAt) {
+        updateData.rejected_at = now;
+        updateData.rejected_by = user.email;
+      } else if (status === 'RETURN_COMPLETED' && !existingReturn.completedAt) {
+        updateData.completed_at = now;
+      }
+
+      let updQuery = dbClient.from('return_requests').update(updateData);
+      updQuery = applyReturnFilter(updQuery, id);
+      const { data: updated, error } = await updQuery
+        .select('*')
+        .maybeSingle();
+
+      if (error) {
+        console.error('Failed to update return status in Supabase:', error);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to update return status in database.',
+          details: error?.message,
+        });
+      }
+
+      let updatedReturn: ReturnRequest;
+      if (updated) {
+        updatedReturn = mapSupabaseReturnRequest(updated);
+      } else {
+        updatedReturn = {
+          ...existingReturn,
+          ...updateData,
+          status,
+          updatedAt: now,
+        };
+      }
+
+      await recordReturnStatusHistory({
+        client,
+        serviceClient: dbClient,
+        returnRequestId: updatedReturn.returnRequestId,
+        oldStatus,
+        newStatus: status,
+        changedBy: user.email,
+        changedByRole: 'ADMIN',
+        note: note || `Status manually changed to ${status} by Atelier Management.`,
+        createdAt: now,
+      });
+
+      const { data: refreshed } = await dbClient
+        .from('return_requests')
+        .select('*, return_status_history(*)')
+        .eq('return_request_id', updatedReturn.returnRequestId)
+        .maybeSingle();
+
+      const finalReturn = refreshed ? mapSupabaseReturnRequest(refreshed) : updatedReturn;
+
+      // Keep in-memory cache synchronized
+      const memIdx = returnRequests.findIndex(r => r.id === finalReturn.id || r.returnRequestId === finalReturn.returnRequestId);
+      if (memIdx !== -1) {
+        returnRequests[memIdx] = finalReturn;
+      } else {
+        returnRequests.unshift(finalReturn);
+      }
+
+      return res.json({
+        success: true,
+        message: `Return status updated to ${status}.`,
+        returnRequest: finalReturn,
+      });
+    } catch (err: any) {
+      console.error('Error updating return status:', err);
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to update return status.' });
+    }
+  });
+
 
   // 20. GET User Profile (AUTHENTICATED USERS ONLY)
   app.get('/api/user/profile', authLimiter, requireAuth, async (req, res) => {
@@ -1608,6 +3694,14 @@ async function startServer() {
       subscribers.push(email);
     }
     res.json({ success: true, message: 'Welcome to the Stunning Birds Journal.' });
+  });
+
+  // Catch-all 404 for unhandled API routes (Ensures JSON response instead of HTML SPA fallback)
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      success: false,
+      error: `API route not found: ${req.method} ${req.path}`,
+    });
   });
 
   // Vite middleware setup

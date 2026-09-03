@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Plus, Sparkles, Trash2, RefreshCw } from 'lucide-react';
+import { X, Plus, Sparkles, Trash2, RefreshCw, Palette, Unlink } from 'lucide-react';
 import { useShop } from '../context/ShopContext';
 import { ProductCategory, ProductHighlight } from '../types';
 import { ImageGalleryUploader } from './ImageGalleryUploader';
@@ -20,6 +20,8 @@ export const AdminNewProductModal: React.FC<Props> = ({ onClose }) => {
   const [category, setCategory] = useState<ProductCategory>('Bifold Wallets');
   const [colorName, setColorName] = useState('Espresso Bridle');
   const [colorHex, setColorHex] = useState('#3a2012');
+  const [variantGroup, setVariantGroup] = useState('');
+  const [linkedVariantIds, setLinkedVariantIds] = useState<string[]>([]);
   const [material, setMaterial] = useState('Full-Grain Italian Calfskin');
   const [description, setDescription] = useState('Hand-cut, hand-burnished bespoke leather wallet crafted with heirloom durability.');
   const [images, setImages] = useState<string[]>([
@@ -110,6 +112,8 @@ export const AdminNewProductModal: React.FC<Props> = ({ onClose }) => {
         badge: badge ? (badge as any) : undefined,
         stockQuantity: parseInt(stockQuantity, 10) || 0,
         productHighlights: validHighlights,
+        variantGroup: variantGroup.trim(),
+        linkedVariantIds,
       });
 
       onClose();
@@ -242,7 +246,7 @@ export const AdminNewProductModal: React.FC<Props> = ({ onClose }) => {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
             <div>
               <label className="text-xs font-semibold uppercase tracking-wider text-[#181614] block mb-1">
                 Color Name
@@ -254,6 +258,27 @@ export const AdminNewProductModal: React.FC<Props> = ({ onClose }) => {
                 placeholder="e.g. Cognac Bridle"
                 className="w-full bg-white border border-[#ded5c7] px-3.5 py-2.5 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
               />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wider text-[#181614] block mb-1">
+                Swatch (HEX)
+              </label>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="color"
+                  value={colorHex.startsWith('#') ? colorHex : '#3a2012'}
+                  onChange={e => setColorHex(e.target.value)}
+                  className="w-9 h-9 p-0.5 border border-[#ded5c7] rounded-xs cursor-pointer bg-white"
+                />
+                <input
+                  type="text"
+                  value={colorHex}
+                  onChange={e => setColorHex(e.target.value)}
+                  placeholder="#3a2012"
+                  className="w-full bg-white border border-[#ded5c7] px-2 py-2 text-xs font-mono text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
+                />
+              </div>
             </div>
 
             <div>
@@ -283,6 +308,108 @@ export const AdminNewProductModal: React.FC<Props> = ({ onClose }) => {
                 onChange={e => setStockQuantity(e.target.value)}
                 className="w-full bg-white border border-[#ded5c7] px-3.5 py-2.5 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
               />
+            </div>
+          </div>
+
+          {/* COLOUR VARIANTS & FAMILY LINKING */}
+          <div className="p-4 bg-[#fcfbf9] border border-[#e8dfd2] rounded-xs space-y-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <Palette className="w-4 h-4 text-[#8c562e]" />
+                <h4 className="text-xs font-bold uppercase tracking-wider text-[#181614]">
+                  Colour Variants & Family Linking
+                </h4>
+              </div>
+              <p className="text-[11px] text-[#78716c] mt-0.5">
+                Link this new product with other colorways of the same product style. Customers will be able to switch colours seamlessly on the product page.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-[#181614] block mb-1">
+                Variant Group / Collection Name (Optional)
+              </label>
+              <input
+                type="text"
+                value={variantGroup}
+                onChange={e => setVariantGroup(e.target.value)}
+                placeholder="e.g. Heritage Bifold Series"
+                className="w-full bg-white border border-[#ded5c7] px-3 py-2 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
+              />
+            </div>
+
+            {/* Currently Linked Variants */}
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-[#181614] block mb-1.5">
+                Linked Colourways ({linkedVariantIds.length})
+              </label>
+              {linkedVariantIds.length === 0 ? (
+                <p className="text-xs italic text-[#a8a29e] p-2.5 bg-white border border-dashed border-[#e4dcd0] rounded-xs text-center">
+                  No other colorways linked yet. Select existing products below if this is a new colour of an existing design.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {linkedVariantIds.map(vId => {
+                    const linkedProd = products.find(p => p.id === vId || p.slug === vId);
+                    if (!linkedProd) return null;
+
+                    return (
+                      <div
+                        key={vId}
+                        className="flex items-center justify-between p-2.5 bg-white border border-[#ded5c7] rounded-xs"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span
+                            className="w-4 h-4 rounded-full shrink-0 border border-black/15 shadow-2xs"
+                            style={{ backgroundColor: linkedProd.colorHex || '#3a2012' }}
+                          />
+                          <span className="text-xs font-semibold text-[#181614] truncate">
+                            {linkedProd.name} ({linkedProd.colorName})
+                          </span>
+                          <span className="text-[11px] text-[#78716c]">
+                            SKU: {linkedProd.sku || linkedProd.skuId || 'N/A'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setLinkedVariantIds(prev => prev.filter(id => id !== vId))}
+                          className="p-1 text-[#9ca3af] hover:text-[#dc2626] rounded-xs transition-colors cursor-pointer"
+                          title="Unlink"
+                        >
+                          <Unlink className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Link another product dropdown */}
+            <div className="pt-2 border-t border-[#ede7de]">
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-[#181614] block mb-1">
+                Link Existing Product as Colour Variant
+              </label>
+              <select
+                className="w-full bg-white border border-[#ded5c7] px-3 py-2 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
+                defaultValue=""
+                onChange={e => {
+                  const selectedId = e.target.value;
+                  if (selectedId && !linkedVariantIds.includes(selectedId)) {
+                    setLinkedVariantIds(prev => [...prev, selectedId]);
+                    e.target.value = '';
+                  }
+                }}
+              >
+                <option value="" disabled>Choose existing product to link...</option>
+                {products
+                  .filter(p => !linkedVariantIds.includes(p.id))
+                  .map(p => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} — {p.colorName} ({p.sku || p.skuId || 'No SKU'} | ₹{p.sellingPrice ?? p.price})
+                    </option>
+                  ))}
+              </select>
             </div>
           </div>
 

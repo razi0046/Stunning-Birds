@@ -1,7 +1,5 @@
 import { Order, ShippingLabel, ShippingLabelSeller, Product } from '../types';
 import { INITIAL_PRODUCTS } from '../data/mockData';
-import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
 
 export const DEFAULT_SELLER_INFO: ShippingLabelSeller = {
   name: 'STUNNING BIRDS ATELIER & LEATHERWORKS',
@@ -423,6 +421,7 @@ const LABEL_STANDALONE_CSS = `
 `;
 
 async function renderCleanLabelCanvas(element: HTMLElement): Promise<HTMLCanvasElement> {
+  const { default: html2canvas } = await import('html2canvas');
   return await html2canvas(element, {
     scale: 2.5,
     useCORS: true,
@@ -449,6 +448,7 @@ export async function downloadShippingLabelPDF(
   filename: string = 'shipping-label.pdf'
 ): Promise<void> {
   try {
+    const { default: jsPDF } = await import('jspdf');
     // Render high DPI canvas safely without oklch parsing errors
     const canvas = await renderCleanLabelCanvas(element);
 
@@ -483,6 +483,7 @@ export async function downloadBatchShippingLabelsPDF(
   }
 
   try {
+    const { default: jsPDF } = await import('jspdf');
     const pdf = new jsPDF({
       orientation: 'portrait',
       unit: 'mm',

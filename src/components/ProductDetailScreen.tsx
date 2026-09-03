@@ -25,6 +25,8 @@ import { applyProductSEO, resetDefaultSEO, getProductCanonicalUrl } from '../uti
 export const ProductDetailScreen: React.FC = () => {
   const { 
     selectedProduct, 
+    setSelectedProduct,
+    getProductVariants,
     addToCart, 
     userProfile, 
     toggleWishlist, 
@@ -37,6 +39,20 @@ export const ProductDetailScreen: React.FC = () => {
 
   const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [openAccordion, setOpenAccordion] = useState<string | null>('materials');
+
+  // Reset active image index when selected product changes (e.g. colour variant switch)
+  useEffect(() => {
+    setActiveImageIndex(0);
+  }, [selectedProduct?.id]);
+
+  // Color variants associated with this product
+  const colourVariants = React.useMemo(() => {
+    if (!selectedProduct) return [];
+    return getProductVariants(selectedProduct);
+  }, [selectedProduct, getProductVariants]);
+
+  const isCurrentInStock = selectedProduct.inStock !== false && (selectedProduct.stockQuantity === undefined || selectedProduct.stockQuantity > 0);
+  const currentStockQuantity = selectedProduct.stockQuantity;
 
   // Dynamic Product SEO: Updates <title>, meta description, canonical URL, OpenGraph, Twitter card, and Schema.org JSON-LD
   useEffect(() => {
@@ -317,6 +333,24 @@ export const ProductDetailScreen: React.FC = () => {
                 <span className="inline-flex items-center px-2 py-0.5 rounded-xs bg-[#f6f2ea] border border-[#ded5c7] font-mono text-[11px] font-bold text-[#181614]">
                   SKU: {selectedProduct.sku || selectedProduct.skuId || 'SB-PROD-001'}
                 </span>
+                {isCurrentInStock ? (
+                  typeof currentStockQuantity === 'number' && currentStockQuantity <= 5 ? (
+                    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-xs bg-[#fff7ed] border border-[#ffedd5] font-medium text-[11px] text-[#c2410c]">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#ea580c] animate-pulse" />
+                      Only {currentStockQuantity} Left in Stock
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-xs bg-[#f0fdf4] border border-[#dcfce7] font-medium text-[11px] text-[#15803d]">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#16a34a]" />
+                      In Stock
+                    </span>
+                  )
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-xs bg-[#fef2f2] border border-[#fee2e2] font-medium text-[11px] text-[#b91c1c]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#dc2626]" />
+                    Out of Stock
+                  </span>
+                )}
                 {selectedProduct.badge && (
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wider uppercase bg-[#181614] text-[#d4af37]">
                     {selectedProduct.badge}
@@ -420,6 +454,91 @@ export const ProductDetailScreen: React.FC = () => {
               </p>
             </div>
 
+            {/* AVAILABLE COLOURS VARIANT SELECTOR */}
+            {colourVariants.length > 1 && (
+              <div id="product-available-colours-section" className="p-4 bg-[#fcfbf8] border border-[#e8dfd2] rounded-xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold uppercase tracking-widest text-[#181614]">
+                      Available Colours:
+                    </span>
+                    <span className="text-xs font-serif-luxury font-semibold text-[#8c562e] capitalize">
+                      {selectedProduct.colorName}
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-[#8c857d]">
+                    {colourVariants.filter(v => v.inStock !== false && (v.stockQuantity === undefined || v.stockQuantity > 0)).length} in stock
+                  </span>
+                </div>
+
+                {/* Swatches / Buttons list */}
+                <div className="flex flex-wrap gap-2.5">
+                  {colourVariants.map(variant => {
+                    const isSelected = variant.id === selectedProduct.id;
+                    const isVariantInStock = variant.inStock !== false && (variant.stockQuantity === undefined || variant.stockQuantity > 0);
+
+                    return (
+                      <button
+                        key={variant.id}
+                        id={`color-variant-${variant.id}`}
+                        type="button"
+                        disabled={!isVariantInStock}
+                        onClick={() => {
+                          if (isVariantInStock && !isSelected) {
+                            setSelectedProduct(variant);
+                            setActiveImageIndex(0);
+                          }
+                        }}
+                        title={
+                          !isVariantInStock 
+                            ? `${variant.colorName} - Currently Out of Stock` 
+                            : `${variant.colorName} (${formatINR(variant.sellingPrice ?? variant.price)})`
+                        }
+                        aria-label={`${variant.colorName}${!isVariantInStock ? ' - Out of stock' : ''}`}
+                        className={`group relative flex items-center gap-2.5 px-3 py-2 rounded-xs border text-xs transition-all duration-200 ${
+                          isSelected
+                            ? 'bg-white border-[#8c562e] ring-2 ring-[#8c562e]/30 shadow-xs'
+                            : isVariantInStock
+                            ? 'bg-white/90 border-[#ded5c7] hover:border-[#8c562e] hover:bg-white cursor-pointer'
+                            : 'bg-[#f4efe8]/60 border-dashed border-[#d8cfc0] opacity-60 cursor-not-allowed'
+                        }`}
+                      >
+                        {/* Color Swatch Circle */}
+                        <span className="relative w-5 h-5 rounded-full shrink-0 overflow-hidden shadow-2xs border border-black/15">
+                          <span
+                            className="absolute inset-0 rounded-full"
+                            style={{ backgroundColor: variant.colorHex || '#3a2012' }}
+                          />
+                          {/* If out of stock, diagonal slash line across color swatch */}
+                          {!isVariantInStock && (
+                            <span className="absolute inset-0 flex items-center justify-center">
+                              <span className="w-[140%] h-[1.5px] bg-[#991b1b] rotate-45" />
+                            </span>
+                          )}
+                        </span>
+
+                        {/* Color Name */}
+                        <span className={`text-xs font-medium tracking-wide ${
+                          isSelected ? 'text-[#181614] font-bold' : isVariantInStock ? 'text-[#38332e]' : 'text-[#8c857d] line-through'
+                        }`}>
+                          {variant.colorName}
+                        </span>
+
+                        {/* Status indicators */}
+                        {!isVariantInStock ? (
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-[#991b1b] bg-[#fee2e2] px-1.5 py-0.5 rounded-2xs">
+                            Sold Out
+                          </span>
+                        ) : isSelected ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#8c562e] shrink-0" />
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* PRODUCT HIGHLIGHTS SPECIFICATION CARD */}
             {((selectedProduct.productHighlights && selectedProduct.productHighlights.length > 0) || selectedProduct.material) && (
               <div className="p-4 bg-[#fbf9f5] border border-[#e4d9cb] rounded-xs space-y-3">
@@ -473,15 +592,25 @@ export const ProductDetailScreen: React.FC = () => {
             <div className="space-y-4 pt-2">
               <div className="flex flex-col sm:flex-row gap-3">
                 {/* Add to Bag Button */}
-                <motion.button
-                  id="add-to-bag-btn"
-                  whileHover={{ scale: 1.01 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={handleAdd}
-                  className="flex-1 py-4 bg-black hover:bg-[#8c562e] text-white text-xs font-semibold uppercase tracking-[0.2em] transition-colors duration-200 shadow-md cursor-pointer flex items-center justify-center gap-2"
-                >
-                  <span>Add to Bag</span>
-                </motion.button>
+                {isCurrentInStock ? (
+                  <motion.button
+                    id="add-to-bag-btn"
+                    whileHover={{ scale: 1.01 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={handleAdd}
+                    className="flex-1 py-4 bg-black hover:bg-[#8c562e] text-white text-xs font-semibold uppercase tracking-[0.2em] transition-colors duration-200 shadow-md cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <span>Add to Bag</span>
+                  </motion.button>
+                ) : (
+                  <motion.button
+                    id="add-to-bag-btn"
+                    disabled={true}
+                    className="flex-1 py-4 bg-[#ded5c7] text-[#78716c] text-xs font-semibold uppercase tracking-[0.2em] cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    <span>Out of Stock</span>
+                  </motion.button>
+                )}
 
                 {/* Wishlist Button on Product Page */}
                 <motion.button

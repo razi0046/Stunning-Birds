@@ -340,7 +340,7 @@ export const InvoiceModal: React.FC<Props> = ({
                       </div>
                       <div>
                         <span className="text-gray-600 block">Payment Status:</span>
-                        <span className={`font-bold uppercase ${order.paymentStatus === 'Paid' ? 'text-emerald-700' : 'text-amber-700'}`}>
+                        <span className={`font-bold uppercase ${order.paymentStatus === 'Refunded' ? 'text-purple-700' : order.paymentStatus === 'Paid' ? 'text-emerald-700' : 'text-amber-700'}`}>
                           {order.paymentStatus || 'Paid'}
                         </span>
                       </div>

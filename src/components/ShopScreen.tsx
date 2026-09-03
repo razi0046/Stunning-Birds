@@ -6,6 +6,129 @@ import { Product, ProductCategory } from '../types';
 import { formatINR } from '../utils/formatCurrency';
 import { resetDefaultSEO } from '../utils/seoHelper';
 
+interface ShopProductCardProps {
+  product: Product;
+  idx: number;
+  isWishlisted: boolean;
+  onOpenProduct: (slugOrId: string) => void;
+  onAddToCart: (product: Product, quantity: number) => void;
+  onToggleWishlist: (productId: string) => void;
+}
+
+const ShopProductCard: React.FC<ShopProductCardProps> = React.memo(({
+  product,
+  idx,
+  isWishlisted,
+  onOpenProduct,
+  onAddToCart,
+  onToggleWishlist,
+}) => {
+  return (
+    <motion.div
+      key={product.id}
+      initial={{ opacity: 0, y: 24 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true, margin: '-30px' }}
+      transition={{ duration: 0.45, delay: (idx % 4) * 0.06, ease: [0.16, 1, 0.3, 1] }}
+      whileHover={{ y: -4 }}
+      className="group flex flex-col justify-between bg-white border border-[#ece4d8] rounded-xs overflow-hidden shadow-2xs hover:shadow-xl hover:border-[#cfc2b0] transition-all duration-300"
+    >
+      {/* Card Image & Badges */}
+      <div className="relative aspect-4/5 w-full bg-[#f6f2ea] overflow-hidden">
+        {product.badge && (
+          <span className="absolute top-2.5 left-2.5 z-10 px-2 py-0.5 bg-white/95 backdrop-blur-xs text-black text-[9px] font-bold tracking-widest uppercase shadow-2xs">
+            {product.badge}
+          </span>
+        )}
+
+        <motion.button
+          whileHover={{ scale: 1.15 }}
+          whileTap={{ scale: 0.9 }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleWishlist(product.id);
+          }}
+          className="absolute top-2.5 right-2.5 z-10 p-1.5 rounded-full bg-white/85 hover:bg-white text-[#78716c] hover:text-[#8c562e] transition-colors shadow-2xs cursor-pointer"
+          title="Admire item"
+        >
+          <Heart className={`w-3.5 h-3.5 ${isWishlisted ? 'fill-[#8c562e] text-[#8c562e]' : ''}`} />
+        </motion.button>
+
+        <img
+          src={product.images[0]}
+          alt={`${product.name} - Handcrafted ${product.material || 'leather'} in ${product.colorName}`}
+          referrerPolicy="no-referrer"
+          loading={idx < 4 ? "eager" : "lazy"}
+          decoding="async"
+          className="w-full h-full object-cover object-center group-hover:scale-108 transition-transform duration-700 ease-out cursor-pointer"
+          onClick={() => onOpenProduct(product.slug || product.id)}
+        />
+
+        {/* Quick Add Overlay on hover */}
+        <div className="absolute inset-x-0 bottom-0 p-2 sm:p-3 bg-gradient-to-t from-black/70 via-black/30 to-transparent opacity-0 group-hover:opacity-100 transition-all duration-300 translate-y-2 group-hover:translate-y-0 flex gap-1.5 sm:gap-2">
+          <motion.button
+            whileTap={{ scale: 0.96 }}
+            onClick={() => onOpenProduct(product.slug || product.id)}
+            className="flex-1 py-1.5 sm:py-2 bg-white/95 hover:bg-white text-black text-[9px] sm:text-[10px] font-bold uppercase tracking-wider transition-colors shadow-xs cursor-pointer"
+          >
+            Inspect
+          </motion.button>
+          <motion.button
+            whileTap={{ scale: 0.92 }}
+            onClick={() => onAddToCart(product, 1)}
+            className="p-1.5 sm:p-2 bg-[#8c562e] hover:bg-black text-white text-[9px] sm:text-[10px] transition-colors shadow-xs cursor-pointer"
+            title="Add to Bag"
+          >
+            <ShoppingBag className="w-3.5 h-3.5" />
+          </motion.button>
+        </div>
+      </div>
+
+      {/* Product Metadata */}
+      <div className="p-3 sm:p-4 space-y-1.5 sm:space-y-2 flex-1 flex flex-col justify-between">
+        <div>
+          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-0.5 sm:gap-2">
+            <h3
+              onClick={() => onOpenProduct(product.slug || product.id)}
+              className="font-serif-luxury text-xs sm:text-sm font-semibold text-[#181614] group-hover:text-[#8c562e] transition-colors cursor-pointer leading-tight line-clamp-1 sm:line-clamp-none"
+            >
+              {product.name}
+            </h3>
+            <div className="text-left sm:text-right whitespace-nowrap">
+              {Boolean(product.originalPrice && product.originalPrice > product.price) && (
+                <span className="text-[10px] sm:text-[11px] text-[#8c857d] line-through block leading-none mb-0.5">
+                  {formatINR(product.originalPrice!)}
+                </span>
+              )}
+              <span className="font-serif-luxury text-xs sm:text-sm font-semibold text-[#181614]">
+                {formatINR(product.price)}
+              </span>
+            </div>
+          </div>
+
+          <p className="text-[10px] sm:text-[11px] text-[#78716c] mt-0.5 truncate">
+            {product.colorName}
+          </p>
+        </div>
+
+        {/* Star Rating */}
+        <div className="flex items-center gap-1 text-[10px] sm:text-[11px] text-[#78716c] pt-0.5 sm:pt-1">
+          <div className="flex items-center text-[#d4af37]">
+            {[...Array(5)].map((_, i) => (
+              <Star
+                key={i}
+                className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${i < Math.floor(product.rating) ? 'fill-[#d4af37]' : 'text-[#ded5c7]'}`}
+              />
+            ))}
+          </div>
+          <span className="text-[9px] sm:text-[10px]">({product.reviewsCount})</span>
+        </div>
+      </div>
+    </motion.div>
+  );
+});
+ShopProductCard.displayName = 'ShopProductCard';
+
 export const ShopScreen: React.FC = () => {
   const {
     products,
@@ -76,7 +199,7 @@ export const ShopScreen: React.FC = () => {
   const pageTitle = selectedCategoryFilter === 'All' ? 'WALLETS & LEATHER GOODS' : selectedCategoryFilter.toUpperCase();
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 lg:py-16 space-y-12">
+    <div className="w-full max-w-7xl lg:max-w-none mx-auto px-4 sm:px-6 lg:px-10 xl:px-14 py-10 lg:py-16 space-y-12">
       
       {/* Breadcrumb */}
       <motion.nav
@@ -282,113 +405,17 @@ export const ShopScreen: React.FC = () => {
 
           {/* Product Cards Grid with Staggered Scroll Reveals */}
           <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
-            {filteredProducts.map((product, idx) => {
-              const isWishlisted = userProfile.wishlistProductIds.includes(product.id);
-              return (
-                <motion.div
-                  key={product.id}
-                  initial={{ opacity: 0, y: 24 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true, margin: '-30px' }}
-                  transition={{ duration: 0.5, delay: (idx % 4) * 0.08, ease: [0.16, 1, 0.3, 1] }}
-                  whileHover={{ y: -4 }}
-                  className="group flex flex-col justify-between bg-white border border-[#ece4d8] rounded-xs overflow-hidden shadow-2xs hover:shadow-xl hover:border-[#cfc2b0] transition-all duration-300"
-                >
-                  
-                  {/* Card Image & Badges */}
-                  <div className="relative aspect-4/5 w-full bg-[#f6f2ea] overflow-hidden">
-                    {product.badge && (
-                      <span className="absolute top-2.5 left-2.5 z-10 px-2 py-0.5 bg-white/95 backdrop-blur-xs text-black text-[9px] font-bold tracking-widest uppercase shadow-2xs">
-                        {product.badge}
-                      </span>
-                    )}
-
-                    <motion.button
-                      whileHover={{ scale: 1.15 }}
-                      whileTap={{ scale: 0.9 }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleWishlist(product.id);
-                      }}
-                      className="absolute top-2.5 right-2.5 z-10 p-1.5 rounded-full bg-white/85 hover:bg-white text-[#78716c] hover:text-[#8c562e] transition-colors shadow-2xs cursor-pointer"
-                      title="Admire item"
-                    >
-                      <Heart className={`w-3.5 h-3.5 ${isWishlisted ? 'fill-[#8c562e] text-[#8c562e]' : ''}`} />
-                    </motion.button>
-
-                    <img
-                      src={product.images[0]}
-                      alt={`${product.name} - Handcrafted ${product.material || 'leather'} in ${product.colorName}`}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover object-center group-hover:scale-108 transition-transform duration-700 ease-out cursor-pointer"
-                      onClick={() => openProductBySlug(product.slug || product.id)}
-                    />
-
-                    {/* Quick Add Overlay on hover */}
-                    <div className="absolute inset-x-0 bottom-0 p-2 sm:p-3 bg-gradient-to-t from-black/70 via-black/30 to-transparent opacity-0 group-hover:opacity-100 transition-all duration-300 translate-y-2 group-hover:translate-y-0 flex gap-1.5 sm:gap-2">
-                      <motion.button
-                        whileTap={{ scale: 0.96 }}
-                        onClick={() => openProductBySlug(product.slug || product.id)}
-                        className="flex-1 py-1.5 sm:py-2 bg-white/95 hover:bg-white text-black text-[9px] sm:text-[10px] font-bold uppercase tracking-wider transition-colors shadow-xs"
-                      >
-                        Inspect
-                      </motion.button>
-                      <motion.button
-                        whileTap={{ scale: 0.92 }}
-                        onClick={() => addToCart(product, 1)}
-                        className="p-1.5 sm:p-2 bg-[#8c562e] hover:bg-black text-white text-[9px] sm:text-[10px] transition-colors shadow-xs cursor-pointer"
-                        title="Add to Bag"
-                      >
-                        <ShoppingBag className="w-3.5 h-3.5" />
-                      </motion.button>
-                    </div>
-                  </div>
-
-                  {/* Product Metadata */}
-                  <div className="p-3 sm:p-4 space-y-1.5 sm:space-y-2 flex-1 flex flex-col justify-between">
-                    <div>
-                      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-0.5 sm:gap-2">
-                        <h3
-                          onClick={() => openProductBySlug(product.slug)}
-                          className="font-serif-luxury text-xs sm:text-sm font-semibold text-[#181614] group-hover:text-[#8c562e] transition-colors cursor-pointer leading-tight line-clamp-1 sm:line-clamp-none"
-                        >
-                          {product.name}
-                        </h3>
-                        <div className="text-left sm:text-right whitespace-nowrap">
-                          {Boolean(product.originalPrice && product.originalPrice > product.price) && (
-                            <span className="text-[10px] sm:text-[11px] text-[#8c857d] line-through block leading-none mb-0.5">
-                              {formatINR(product.originalPrice!)}
-                            </span>
-                          )}
-                          <span className="font-serif-luxury text-xs sm:text-sm font-semibold text-[#181614]">
-                            {formatINR(product.price)}
-                          </span>
-                        </div>
-                      </div>
-
-                      <p className="text-[10px] sm:text-[11px] text-[#78716c] mt-0.5 truncate">
-                        {product.colorName}
-                      </p>
-                    </div>
-
-                    {/* Star Rating */}
-                    <div className="flex items-center gap-1 text-[10px] sm:text-[11px] text-[#78716c] pt-0.5 sm:pt-1">
-                      <div className="flex items-center text-[#d4af37]">
-                        {[...Array(5)].map((_, i) => (
-                          <Star
-                            key={i}
-                            className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${i < Math.floor(product.rating) ? 'fill-[#d4af37]' : 'text-[#ded5c7]'}`}
-                          />
-                        ))}
-                      </div>
-                      <span className="text-[9px] sm:text-[10px]">({product.reviewsCount})</span>
-                    </div>
-
-                  </div>
-
-                </motion.div>
-              );
-            })}
+            {filteredProducts.map((product, idx) => (
+              <ShopProductCard
+                key={product.id}
+                product={product}
+                idx={idx}
+                isWishlisted={userProfile.wishlistProductIds.includes(product.id)}
+                onOpenProduct={openProductBySlug}
+                onAddToCart={addToCart}
+                onToggleWishlist={toggleWishlist}
+              />
+            ))}
           </div>
 
         </main>

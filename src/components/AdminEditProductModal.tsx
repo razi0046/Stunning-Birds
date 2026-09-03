@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Save, Sparkles, Trash2, Plus, RefreshCw } from 'lucide-react';
+import { X, Save, Sparkles, Trash2, Plus, RefreshCw, Palette, Link2, Unlink } from 'lucide-react';
 import { useShop } from '../context/ShopContext';
 import { Product, ProductCategory, ProductHighlight } from '../types';
 import { ImageGalleryUploader } from './ImageGalleryUploader';
@@ -33,6 +33,21 @@ export const AdminEditProductModal: React.FC<Props> = ({ product, onClose }) => 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Colour Variant Linking State
+  const [variantGroup, setVariantGroup] = useState<string>(product.variantGroup || '');
+  const [linkedVariantIds, setLinkedVariantIds] = useState<string[]>(() => {
+    if (product.linkedVariantIds && product.linkedVariantIds.length > 0) {
+      return product.linkedVariantIds;
+    }
+    const implicitlyLinked = products
+      .filter(p => p.id !== product.id && (
+        p.linkedVariantIds?.includes(product.id) ||
+        (product.variantGroup && p.variantGroup && p.variantGroup.toLowerCase() === product.variantGroup.toLowerCase())
+      ))
+      .map(p => p.id);
+    return Array.from(new Set(implicitlyLinked));
+  });
 
   // Dynamic Product Highlights Key-Value state
   const [highlights, setHighlights] = useState<ProductHighlight[]>(() => {
@@ -117,6 +132,8 @@ export const AdminEditProductModal: React.FC<Props> = ({ product, onClose }) => 
         inStock,
         stockQuantity: parseInt(stockQuantity, 10) || 0,
         productHighlights: validHighlights,
+        variantGroup: variantGroup.trim(),
+        linkedVariantIds,
       });
 
       onClose();
@@ -261,7 +278,7 @@ export const AdminEditProductModal: React.FC<Props> = ({ product, onClose }) => 
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
               <label className="text-xs font-semibold uppercase tracking-wider text-[#181614] block mb-1">
                 Color Name
@@ -273,6 +290,26 @@ export const AdminEditProductModal: React.FC<Props> = ({ product, onClose }) => 
                 placeholder="e.g. Cognac Bridle"
                 className="w-full bg-white border border-[#ded5c7] px-3.5 py-2.5 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
               />
+            </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wider text-[#181614] block mb-1">
+                Color Swatch (HEX)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="color"
+                  value={colorHex.startsWith('#') ? colorHex : '#3a2012'}
+                  onChange={e => setColorHex(e.target.value)}
+                  className="w-10 h-9 p-0.5 border border-[#ded5c7] rounded-xs cursor-pointer bg-white"
+                />
+                <input
+                  type="text"
+                  value={colorHex}
+                  onChange={e => setColorHex(e.target.value)}
+                  placeholder="#3a2012"
+                  className="flex-1 bg-white border border-[#ded5c7] px-3 py-2 text-xs font-mono text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
+                />
+              </div>
             </div>
             <div>
               <label className="text-xs font-semibold uppercase tracking-wider text-[#181614] block mb-1">
@@ -290,6 +327,131 @@ export const AdminEditProductModal: React.FC<Props> = ({ product, onClose }) => 
                 <option value="LIMITED">LIMITED</option>
                 <option value="ARTISAN CHOICE">ARTISAN CHOICE</option>
               </select>
+            </div>
+          </div>
+
+          {/* COLOUR VARIANTS & FAMILY LINKING */}
+          <div className="p-4 bg-[#fcfbf9] border border-[#e8dfd2] rounded-xs space-y-4">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Palette className="w-4 h-4 text-[#8c562e]" />
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-[#181614]">
+                    Colour Variants & Family Linking
+                  </h4>
+                </div>
+                <p className="text-[11px] text-[#78716c] mt-0.5">
+                  Link this product with other colorways of the same product style. On the product page, customers can switch colours with dedicated photos, SKU, price, and stock for each colorway.
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-[#181614] block mb-1">
+                Variant Group / Collection Name (Optional)
+              </label>
+              <input
+                type="text"
+                value={variantGroup}
+                onChange={e => setVariantGroup(e.target.value)}
+                placeholder="e.g. Heritage Bifold Series"
+                className="w-full bg-white border border-[#ded5c7] px-3 py-2 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
+              />
+              <span className="text-[10px] text-[#78716c] mt-0.5 block">
+                Helps group variants across the catalog
+              </span>
+            </div>
+
+            {/* Currently Linked Variants */}
+            <div>
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-[#181614] block mb-1.5">
+                Linked Colourways ({linkedVariantIds.length})
+              </label>
+              {linkedVariantIds.length === 0 ? (
+                <p className="text-xs italic text-[#a8a29e] p-2.5 bg-white border border-dashed border-[#e4dcd0] rounded-xs text-center">
+                  No other colorway variants linked yet. Select an existing product below to link as another colour option.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {linkedVariantIds.map(vId => {
+                    const linkedProd = products.find(p => p.id === vId || p.slug === vId);
+                    if (!linkedProd) return null;
+                    const inStockVariant = linkedProd.inStock !== false && (linkedProd.stockQuantity === undefined || linkedProd.stockQuantity > 0);
+
+                    return (
+                      <div
+                        key={vId}
+                        className="flex items-center justify-between p-2.5 bg-white border border-[#ded5c7] rounded-xs hover:border-[#8c562e] transition-colors"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span
+                            className="w-5 h-5 rounded-full shrink-0 border border-black/15 shadow-2xs"
+                            style={{ backgroundColor: linkedProd.colorHex || '#3a2012' }}
+                            title={linkedProd.colorName}
+                          />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-semibold text-[#181614] truncate">
+                                {linkedProd.name}
+                              </span>
+                              <span className="text-[11px] font-medium text-[#8c562e]">
+                                ({linkedProd.colorName})
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2 text-[10px] text-[#78716c]">
+                              <span>SKU: {linkedProd.sku || linkedProd.skuId || 'N/A'}</span>
+                              <span>•</span>
+                              <span>₹{linkedProd.sellingPrice ?? linkedProd.price}</span>
+                              <span>•</span>
+                              <span className={inStockVariant ? 'text-green-700 font-medium' : 'text-red-600 font-medium'}>
+                                {inStockVariant ? `In Stock (${linkedProd.stockQuantity ?? 50})` : 'Sold Out'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setLinkedVariantIds(prev => prev.filter(id => id !== vId))}
+                          className="p-1.5 text-[#9ca3af] hover:text-[#dc2626] rounded-xs transition-colors cursor-pointer shrink-0 ml-2"
+                          title="Unlink variant"
+                        >
+                          <Unlink className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Selector to Link Other Catalog Products */}
+            <div className="pt-2 border-t border-[#ede7de]">
+              <label className="text-[11px] font-semibold uppercase tracking-wider text-[#181614] block mb-1">
+                Link Another Product as Colourway
+              </label>
+              <div className="flex gap-2">
+                <select
+                  id="link-variant-select"
+                  className="flex-1 bg-white border border-[#ded5c7] px-3 py-2 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
+                  defaultValue=""
+                  onChange={e => {
+                    const selectedId = e.target.value;
+                    if (selectedId && !linkedVariantIds.includes(selectedId)) {
+                      setLinkedVariantIds(prev => [...prev, selectedId]);
+                      e.target.value = '';
+                    }
+                  }}
+                >
+                  <option value="" disabled>Choose a product to link as colorway...</option>
+                  {products
+                    .filter(p => p.id !== product.id && !linkedVariantIds.includes(p.id))
+                    .map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} — {p.colorName} ({p.sku || p.skuId || 'No SKU'} | ₹{p.sellingPrice ?? p.price})
+                      </option>
+                    ))}
+                </select>
+              </div>
             </div>
           </div>
 

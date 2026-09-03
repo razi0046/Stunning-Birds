@@ -215,8 +215,26 @@ export const ProductPatchSchema = z.object({
  * 9. Order Status Update Schema
  */
 export const OrderStatusPatchSchema = z.object({
-  fulfillmentStatus: z.enum(['CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED']).optional(),
-  paymentStatus: z.enum(['Paid', 'Pending', 'Failed', 'Refunded']).optional(),
+  fulfillmentStatus: z.enum(['PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED']).optional(),
+  paymentStatus: z.enum(['Paid', 'Pending', 'Failed', 'Refunded', 'Draft']).optional(),
+});
+
+/**
+ * 9.1 Customer Order Cancellation Schema
+ */
+export const OrderCancelSchema = z.object({
+  reason: safeString(500).optional(),
+  note: safeString(1000).optional(),
+});
+
+/**
+ * 9.2 Bulk Order Status Update Schema (Admin Only)
+ */
+export const BulkOrderStatusPatchSchema = z.object({
+  orderIds: z.array(safeString(100, 1)).min(1, 'At least one order ID is required').max(200, 'Cannot update more than 200 orders at once'),
+  fulfillmentStatus: z.enum(['PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
+  reason: safeString(500).optional(),
+  note: safeString(1000).optional(),
 });
 
 /**
@@ -231,4 +249,75 @@ export const NewsletterSchema = z.object({
  */
 export const WishlistToggleSchema = z.object({
   productId: safeString(100, 1),
+});
+
+/**
+ * 12. Return Request Schemas (Strict 7-Day & 3-Reason Return Policy)
+ */
+export const CreateReturnRequestSchema = z.object({
+  orderId: safeString(100, 1),
+  orderItemId: safeString(100).optional().nullable(),
+  productId: safeString(100).optional().nullable(),
+  reason: z.enum(['WRONG_PRODUCT', 'DEFECTIVE_PRODUCT', 'MISSING_PRODUCT_PART']),
+  description: safeString(1000, 10),
+  evidenceEmailConfirmed: z.boolean().refine(val => val === true, {
+    message: 'You must confirm sending the complete unboxing video to stunningbirds236@gmail.com',
+  }),
+});
+
+export const AdminReturnRejectSchema = z.object({
+  rejectionReason: safeString(1000, 5),
+});
+
+export const AdminReturnCourierStatusSchema = z.object({
+  status: z.enum([
+    'RETURN_REQUESTED',
+    'RETURN_APPROVED',
+    'RETURN_REJECTED',
+    'PICKUP_SCHEDULED',
+    'PICKED_UP',
+    'IN_TRANSIT',
+    'RETURN_RECEIVED',
+    'INSPECTION_COMPLETED',
+    'REFUND_INITIATED',
+    'REFUNDED',
+    'RETURN_COMPLETED',
+  ]).optional().default('PICKUP_SCHEDULED'),
+  courierName: safeString(100).optional(),
+  trackingNumber: safeString(100).optional(),
+  pickupNotes: safeString(1000).optional(),
+  adminNotes: safeString(1000).optional(),
+});
+
+export const AdminReturnInspectionSchema = z.object({
+  inspectionResult: z.enum(['PASSED', 'FAILED']),
+  inspectionNotes: safeString(2000, 5),
+});
+
+export const AdminReturnRefundSchema = z.object({
+  refundAmount: z.coerce.number().min(0, 'Refund amount cannot be negative').max(10000000).optional(),
+  refundReference: safeString(200).optional(),
+  refundedAt: safeString(100).optional(),
+  manualRefundNote: safeString(1000).optional(),
+  notes: safeString(1000).optional(),
+  status: z.enum(['REFUNDED', 'RETURN_COMPLETED']).optional().default('REFUNDED'),
+  markCompleted: z.boolean().optional(),
+  forceManual: z.boolean().optional(),
+});
+
+export const AdminReturnStatusSchema = z.object({
+  status: z.enum([
+    'RETURN_REQUESTED',
+    'RETURN_APPROVED',
+    'RETURN_REJECTED',
+    'PICKUP_SCHEDULED',
+    'PICKED_UP',
+    'IN_TRANSIT',
+    'RETURN_RECEIVED',
+    'INSPECTION_COMPLETED',
+    'REFUND_INITIATED',
+    'REFUNDED',
+    'RETURN_COMPLETED',
+  ]),
+  note: safeString(1000).optional(),
 });

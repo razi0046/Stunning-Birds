@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   TrendingUp, 
@@ -40,13 +40,15 @@ import {
   Square,
   FileDown,
   FileText,
-  AlertTriangle
+  AlertTriangle,
+  RotateCcw
 } from 'lucide-react';
 import { useShop } from '../context/ShopContext';
 import { AdminNewProductModal } from './AdminNewProductModal';
 import { AdminEditProductModal } from './AdminEditProductModal';
+import { AdminReturnsManagement } from './AdminReturnsManagement';
 import { formatINR } from '../utils/formatCurrency';
-import { Order, Product, ProductCategory } from '../types';
+import { Order, Product, ProductCategory, FulfillmentStatus } from '../types';
 import { ShippingLabelView } from './ShippingLabelView';
 import { 
   generateShippingLabelData, 
@@ -55,7 +57,7 @@ import {
 } from '../utils/shippingLabelGenerator';
 import { supabase } from '../supabaseClient';
 
-export type AdminTab = 'overview' | 'orders' | 'products' | 'analytics' | 'settings';
+export type AdminTab = 'overview' | 'orders' | 'returns' | 'products' | 'analytics' | 'settings';
 
 export const AdminOverviewScreen: React.FC = () => {
   const { 
@@ -64,6 +66,7 @@ export const AdminOverviewScreen: React.FC = () => {
     products, 
     setCurrentScreen, 
     updateOrderStatus,
+    bulkUpdateOrderStatus,
     updateProduct,
     deleteProduct,
     deleteOrder,
@@ -82,8 +85,13 @@ export const AdminOverviewScreen: React.FC = () => {
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
-  const [timeRange, setTimeRange] = useState<'Last 30 Days' | 'Today' | 'Last 7 Days' | 'This Quarter' | 'All Time'>('Last 30 Days');
+  const [timeRange, setTimeRange] = useState<'Last 30 Days' | 'Today' | 'Last 7 Days' | 'This Quarter' | 'All Time' | 'Custom Dates'>('Last 30 Days');
+  const [appliedCustomRange, setAppliedCustomRange] = useState<{ startDate: string; endDate: string } | null>(null);
   const [isTimeDropdownOpen, setIsTimeDropdownOpen] = useState(false);
+  const [isCustomDateModalOpen, setIsCustomDateModalOpen] = useState(false);
+  const [tempStartDate, setTempStartDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [tempEndDate, setTempEndDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [customDateError, setCustomDateError] = useState<string | null>(null);
   const [isDeletingProduct, setIsDeletingProduct] = useState(false);
   const [isDeletingOrder, setIsDeletingOrder] = useState(false);
   const [hoveredMonthIndex, setHoveredMonthIndex] = useState<number | null>(null);
@@ -157,6 +165,30 @@ export const AdminOverviewScreen: React.FC = () => {
   const [isBatchDownloadingOverview, setIsBatchDownloadingOverview] = useState(false);
   const [batchOverviewProgress, setBatchOverviewProgress] = useState<{ current: number; total: number } | null>(null);
   const [singleDownloadingOverviewId, setSingleDownloadingOverviewId] = useState<string | null>(null);
+
+  // Bulk Fulfillment Status Update state
+  const [bulkOverviewFulfillmentStatus, setBulkOverviewFulfillmentStatus] = useState<FulfillmentStatus>('PROCESSING');
+  const [isBulkOverviewUpdating, setIsBulkOverviewUpdating] = useState(false);
+
+  const handleApplyOverviewBulkStatus = async (targetStatus?: FulfillmentStatus) => {
+    const statusToApply = targetStatus || bulkOverviewFulfillmentStatus;
+    if (!selectedOverviewOrderIds || selectedOverviewOrderIds.length === 0) {
+      showToast('Please select at least one order to update.');
+      return;
+    }
+
+    setIsBulkOverviewUpdating(true);
+    try {
+      const result = await bulkUpdateOrderStatus(selectedOverviewOrderIds, statusToApply);
+      if (result.success) {
+        showToast(`Successfully updated ${selectedOverviewOrderIds.length} orders to ${statusToApply}`);
+      }
+    } catch (err: any) {
+      console.error('Error applying bulk status:', err);
+    } finally {
+      setIsBulkOverviewUpdating(false);
+    }
+  };
 
   // Products Tab Filters & Search
   const [productSearch, setProductSearch] = useState('');
@@ -263,10 +295,78 @@ export const AdminOverviewScreen: React.FC = () => {
     }
   };
 
-  // Filter strictly paid/successful orders (excluding Failed, Pending, Unpaid, Cancelled)
+  // Helper: Format YYYY-MM-DD into "30 Aug 2026"
+  const formatDisplayDate = (dateStr?: string | null): string => {
+    if (!dateStr) return 'Select Date';
+    const parts = dateStr.split('-').map(Number);
+    if (parts.length !== 3 || isNaN(parts[0]) || isNaN(parts[1]) || isNaN(parts[2])) {
+      return dateStr;
+    }
+    const [y, m, d] = parts;
+    const date = new Date(y, m - 1, d);
+    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+
+  // Helper: Filter orders by selected timeframe with inclusive date boundary handling
+  const overviewOrders = useMemo(() => {
+    if (!orders || orders.length === 0) return [];
+    if (timeRange === 'All Time') return orders;
+
+    let startBound: number | null = null;
+    let endBound: number | null = null;
+    const now = new Date();
+
+    if (timeRange === 'Today') {
+      startBound = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime();
+      endBound = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+    } else if (timeRange === 'Last 7 Days') {
+      startBound = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0, 0).getTime();
+      endBound = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+    } else if (timeRange === 'Last 30 Days') {
+      startBound = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29, 0, 0, 0, 0).getTime();
+      endBound = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+    } else if (timeRange === 'This Quarter') {
+      const currentMonth = now.getMonth();
+      const quarterStartMonth = Math.floor(currentMonth / 3) * 3;
+      startBound = new Date(now.getFullYear(), quarterStartMonth, 1, 0, 0, 0, 0).getTime();
+      endBound = new Date(now.getFullYear(), quarterStartMonth + 3, 0, 23, 59, 59, 999).getTime();
+    } else if (timeRange === 'Custom Dates' && appliedCustomRange?.startDate && appliedCustomRange?.endDate) {
+      const [sY, sM, sD] = appliedCustomRange.startDate.split('-').map(Number);
+      const [eY, eM, eD] = appliedCustomRange.endDate.split('-').map(Number);
+      if (!isNaN(sY) && !isNaN(eY)) {
+        startBound = new Date(sY, sM - 1, sD, 0, 0, 0, 0).getTime();
+        endBound = new Date(eY, eM - 1, eD, 23, 59, 59, 999).getTime();
+      }
+    }
+
+    if (startBound === null && endBound === null) return orders;
+
+    return orders.filter(order => {
+      if (!order) return false;
+      let orderTime: number;
+      if (order.date) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(order.date)) {
+          const [y, m, d] = order.date.split('-').map(Number);
+          orderTime = new Date(y, m - 1, d, 12, 0, 0, 0).getTime();
+        } else {
+          const parsed = Date.parse(order.date);
+          orderTime = isNaN(parsed) ? new Date(order.date).getTime() : parsed;
+        }
+      } else {
+        orderTime = Date.now();
+      }
+
+      if (isNaN(orderTime)) return true;
+      if (startBound !== null && orderTime < startBound) return false;
+      if (endBound !== null && orderTime > endBound) return false;
+      return true;
+    });
+  }, [orders, timeRange, appliedCustomRange]);
+
+  // Filter strictly paid/successful orders within the selected timeframe
   const paidOrders = useMemo(() => {
-    return (orders || []).filter(o => o && o.paymentStatus === 'Paid');
-  }, [orders]);
+    return (overviewOrders || []).filter(o => o && o.paymentStatus === 'Paid');
+  }, [overviewOrders]);
 
   // Dynamic Metrics Calculation based strictly on real paid orders
   const calculatedMetrics = useMemo(() => {
@@ -526,14 +626,16 @@ export const AdminOverviewScreen: React.FC = () => {
 
   const getFulfillmentBadgeClass = (status: string) => {
     switch (status) {
+      case 'PROCESSING':
+        return 'bg-[#f3e8ff] text-[#6b21a8] border-[#e9d5ff]';
       case 'CRAFTING':
         return 'bg-[#fef3c7] text-[#92400e] border-[#fde68a]';
       case 'SHIPPED':
         return 'bg-[#e0f2fe] text-[#075985] border-[#bae6fd]';
-      case 'PROCESSING':
-        return 'bg-[#f3e8ff] text-[#6b21a8] border-[#e9d5ff]';
       case 'DELIVERED':
         return 'bg-[#dcfce7] text-[#166534] border-[#bbf7d0]';
+      case 'CANCELLED':
+        return 'bg-[#fee2e2] text-[#991b1b] border-[#fecaca]';
       default:
         return 'bg-[#f6f2ea] text-[#8c562e] border-[#e4d9cb]';
     }
@@ -591,6 +693,19 @@ export const AdminOverviewScreen: React.FC = () => {
               <span className="px-2 py-0.5 rounded-full bg-[#8c562e] text-[10px] text-white font-bold">
                 {orders.length}
               </span>
+            </button>
+
+            <button
+              id="admin-nav-returns"
+              onClick={() => setActiveTab('returns')}
+              className={`w-full flex items-center space-x-3 px-3.5 py-3 rounded-xs transition-colors cursor-pointer ${
+                activeTab === 'returns'
+                  ? 'bg-[#2e2824] text-white border-l-2 border-[#d4af37]'
+                  : 'text-[#a8a199] hover:bg-[#262320] hover:text-white'
+              }`}
+            >
+              <RotateCcw className="w-4 h-4 text-[#d4af37]" />
+              <span>Returns & Refunds</span>
             </button>
 
             <button
@@ -676,7 +791,7 @@ export const AdminOverviewScreen: React.FC = () => {
       </aside>
 
       {/* Main Dashboard Content Area */}
-      <main className="flex-1 p-6 sm:p-8 lg:p-10 space-y-8 max-w-7xl">
+      <main className="flex-1 p-6 sm:p-8 lg:p-10 space-y-8 max-w-7xl lg:max-w-none w-full">
         
         {/* ===================== TAB 1: OVERVIEW ===================== */}
         {activeTab === 'overview' && (
@@ -701,32 +816,67 @@ export const AdminOverviewScreen: React.FC = () => {
                 {/* Time Range Dropdown */}
                 <div className="relative">
                   <button
+                    id="admin-time-range-dropdown-btn"
                     onClick={() => setIsTimeDropdownOpen(!isTimeDropdownOpen)}
                     className="flex items-center space-x-2 bg-white border border-[#ded5c7] hover:border-[#8c562e] px-3.5 py-2 text-xs text-[#554e47] rounded-xs shadow-2xs cursor-pointer transition-colors"
                   >
                     <Calendar className="w-3.5 h-3.5 text-[#8c562e]" />
-                    <span>{timeRange}</span>
+                    <span className="font-medium">
+                      {timeRange === 'Custom Dates' && appliedCustomRange
+                        ? `${formatDisplayDate(appliedCustomRange.startDate)} – ${formatDisplayDate(appliedCustomRange.endDate)}`
+                        : timeRange}
+                    </span>
                     <ChevronDown className="w-3 h-3 text-[#8c857d]" />
                   </button>
 
                   {isTimeDropdownOpen && (
-                    <div className="absolute right-0 mt-1 w-44 bg-white border border-[#ded5c7] rounded-xs shadow-lg py-1 z-20 text-xs">
+                    <div className="absolute right-0 mt-1 w-56 bg-white border border-[#ded5c7] rounded-xs shadow-lg py-1 z-20 text-xs">
                       {(['Today', 'Last 7 Days', 'Last 30 Days', 'This Quarter', 'All Time'] as const).map(tr => (
                         <button
                           key={tr}
+                          id={`admin-timerange-option-${tr.toLowerCase().replace(/\s+/g, '-')}`}
                           onClick={() => {
                             setTimeRange(tr);
+                            setAppliedCustomRange(null);
                             setIsTimeDropdownOpen(false);
                             showToast(`Updated view to: ${tr}`);
                           }}
-                          className={`w-full text-left px-3.5 py-2 hover:bg-[#f6f2ea] flex items-center justify-between ${
+                          className={`w-full text-left px-3.5 py-2.5 hover:bg-[#f6f2ea] flex items-center justify-between cursor-pointer transition-colors ${
                             timeRange === tr ? 'font-bold text-[#8c562e] bg-[#faf7f2]' : 'text-[#181614]'
                           }`}
                         >
                           <span>{tr}</span>
-                          {timeRange === tr && <Check className="w-3.5 h-3.5" />}
+                          {timeRange === tr && <Check className="w-3.5 h-3.5 text-[#8c562e]" />}
                         </button>
                       ))}
+
+                      <div className="border-t border-[#f0eae0] my-1" />
+
+                      <button
+                        id="admin-timerange-option-custom-dates"
+                        onClick={() => {
+                          setIsTimeDropdownOpen(false);
+                          if (appliedCustomRange) {
+                            setTempStartDate(appliedCustomRange.startDate);
+                            setTempEndDate(appliedCustomRange.endDate);
+                          } else {
+                            const todayStr = new Date().toISOString().split('T')[0];
+                            setTempStartDate(todayStr);
+                            setTempEndDate(todayStr);
+                          }
+                          setCustomDateError(null);
+                          setIsCustomDateModalOpen(true);
+                        }}
+                        className={`w-full text-left px-3.5 py-2.5 hover:bg-[#f6f2ea] flex items-center justify-between cursor-pointer transition-colors ${
+                          timeRange === 'Custom Dates' ? 'font-bold text-[#8c562e] bg-[#faf7f2]' : 'text-[#181614]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Calendar className="w-3.5 h-3.5 text-[#8c562e]" />
+                          <span>Custom Dates...</span>
+                        </div>
+                        {timeRange === 'Custom Dates' && <Check className="w-3.5 h-3.5 text-[#8c562e]" />}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -796,7 +946,7 @@ export const AdminOverviewScreen: React.FC = () => {
             </div>
 
             {/* Revenue Over Time Interactive Chart Visual */}
-            <div className="bg-white p-6 sm:p-8 rounded-xs border border-[#e4dcd0] shadow-2xs space-y-6">
+            <div className="w-full lg:w-full bg-white p-6 sm:p-8 rounded-xs border border-[#e4dcd0] shadow-2xs space-y-6">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
                   <div className="flex items-center gap-2">
@@ -1070,7 +1220,7 @@ export const AdminOverviewScreen: React.FC = () => {
                     Live System Commissions
                   </span>
                   <span className="font-semibold text-[#181614] font-mono text-sm">
-                    {orders.length} Placed Orders
+                    {overviewOrders.length} Placed Order{overviewOrders.length === 1 ? '' : 's'}
                   </span>
                 </div>
               </div>
@@ -1113,7 +1263,7 @@ export const AdminOverviewScreen: React.FC = () => {
                     ))
                   ) : (
                     <div className="text-center py-6 text-xs text-[#a8a199]">
-                      No sales recorded yet. Top pieces will appear as commissions are fulfilled.
+                      No sales recorded in the selected period. Top pieces will appear as commissions are fulfilled.
                     </div>
                   )}
                 </div>
@@ -1134,31 +1284,37 @@ export const AdminOverviewScreen: React.FC = () => {
                 </div>
 
                 <div className="space-y-4">
-                  {orders.slice(0, 4).map(order => (
-                    <div 
-                      key={order.id} 
-                      onClick={() => setSelectedOrder(order)}
-                      className="flex items-center justify-between py-2 border-b border-[#f7f4ee] last:border-0 hover:bg-[#faf7f2] px-2 rounded-xs transition-colors cursor-pointer"
-                    >
-                      <div className="flex items-center space-x-3">
-                        <div className="w-8 h-8 rounded-full bg-[#f6f2ea] border border-[#ded5c7] flex items-center justify-center text-xs font-bold text-[#8c562e]">
-                          {order.customer?.avatarInitials || 'SB'}
+                  {overviewOrders.length > 0 ? (
+                    overviewOrders.slice(0, 4).map(order => (
+                      <div 
+                        key={order.id} 
+                        onClick={() => setSelectedOrder(order)}
+                        className="flex items-center justify-between py-2 border-b border-[#f7f4ee] last:border-0 hover:bg-[#faf7f2] px-2 rounded-xs transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center space-x-3">
+                          <div className="w-8 h-8 rounded-full bg-[#f6f2ea] border border-[#ded5c7] flex items-center justify-center text-xs font-bold text-[#8c562e]">
+                            {order.customer?.avatarInitials || 'SB'}
+                          </div>
+                          <div>
+                            <h4 className="text-xs font-semibold text-[#181614]">{order.customer?.name || 'Valued Patron'}</h4>
+                            <span className="text-[11px] text-[#8c857d]">{order.id} • {order.date}</span>
+                          </div>
                         </div>
-                        <div>
-                          <h4 className="text-xs font-semibold text-[#181614]">{order.customer?.name || 'Valued Patron'}</h4>
-                          <span className="text-[11px] text-[#8c857d]">{order.id} • {order.date}</span>
+                        <div className="text-right">
+                          <span className="font-serif-luxury text-xs font-bold text-[#181614] block">
+                            {formatINR(order.total)}
+                          </span>
+                          <span className={`text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded border ${getFulfillmentBadgeClass(order.fulfillmentStatus)}`}>
+                            {order.fulfillmentStatus}
+                          </span>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <span className="font-serif-luxury text-xs font-bold text-[#181614] block">
-                          {formatINR(order.total)}
-                        </span>
-                        <span className={`text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded border ${getFulfillmentBadgeClass(order.fulfillmentStatus)}`}>
-                          {order.fulfillmentStatus}
-                        </span>
-                      </div>
+                    ))
+                  ) : (
+                    <div className="text-center py-6 text-xs text-[#a8a199]">
+                      No orders placed within this date range.
                     </div>
-                  ))}
+                  )}
                 </div>
               </div>
 
@@ -1204,6 +1360,49 @@ export const AdminOverviewScreen: React.FC = () => {
                   <span>{allOverviewFilteredSelected ? 'Deselect All' : `Select All (${filteredOrders.length})`}</span>
                 </motion.button>
 
+                {/* Bulk Status Update Control (When 1+ Orders Selected) in Header */}
+                {selectedOverviewOrderIds.length > 0 && (
+                  <div className="flex items-center gap-1 bg-[#f6f2ea] p-1 border border-[#ded5c7] rounded-xs shadow-2xs">
+                    <span className="text-[11px] font-semibold text-[#8c562e] uppercase tracking-wider px-1.5 hidden sm:inline-block">
+                      Status:
+                    </span>
+                    <select
+                      id="bulk-status-overview-header-select"
+                      value={bulkOverviewFulfillmentStatus}
+                      onChange={(e) => setBulkOverviewFulfillmentStatus(e.target.value as FulfillmentStatus)}
+                      disabled={isBulkOverviewUpdating}
+                      className="bg-white border border-[#ded5c7] text-[#181614] text-xs font-bold py-1.5 px-2 rounded-xs focus:outline-hidden focus:border-[#8c562e] cursor-pointer disabled:opacity-50"
+                      title="Select fulfillment status to apply to selected orders"
+                    >
+                      <option value="PROCESSING">Processing</option>
+                      <option value="CRAFTING">Crafting</option>
+                      <option value="SHIPPED">Shipped</option>
+                      <option value="DELIVERED">Delivered</option>
+                      <option value="CANCELLED">Cancelled</option>
+                    </select>
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      disabled={isBulkOverviewUpdating}
+                      onClick={() => handleApplyOverviewBulkStatus()}
+                      className="px-3 py-1.5 bg-[#8c562e] hover:bg-[#734320] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 shadow-2xs transition-all cursor-pointer disabled:opacity-50"
+                      title="Apply status update to all selected orders"
+                    >
+                      {isBulkOverviewUpdating ? (
+                        <>
+                          <RefreshCw className="w-3 h-3 animate-spin text-white" />
+                          <span>Applying...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-[#d4af37]" />
+                          <span>Apply</span>
+                        </>
+                      )}
+                    </motion.button>
+                  </div>
+                )}
+
                 {/* Bulk Download Labels Button */}
                 <motion.button
                   whileHover={{ scale: 1.02 }}
@@ -1235,22 +1434,26 @@ export const AdminOverviewScreen: React.FC = () => {
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
-                  onClick={exportOrdersCSV}
+                  onClick={() => {
+                    const targetOrders = selectedOverviewOrderIds.length > 0
+                      ? orders.filter(o => selectedOverviewOrderIds.includes(o.id))
+                      : filteredOrders;
+                    exportOrdersCSV(targetOrders);
+                  }}
                   className="px-3.5 py-2 bg-white border border-[#ded5c7] hover:border-[#8c562e] text-xs font-semibold text-[#181614] uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors shadow-2xs cursor-pointer"
+                  title="Export selected orders to Delhivery Excel (.xlsx)"
                 >
                   <Download className="w-3.5 h-3.5 text-[#8c562e]" />
-                  <span>Export CSV</span>
+                  <span>{selectedOverviewOrderIds.length > 0 ? `Export CSV (${selectedOverviewOrderIds.length})` : 'Export CSV'}</span>
                 </motion.button>
               </div>
             </div>
 
             {/* Selection Banner */}
             {selectedOverviewOrderIds.length > 0 && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-                className="bg-[#181614] text-[#faf7f2] px-4 py-3 rounded-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md"
+              <div
+                id="admin-overview-orders-selection-banner"
+                className="bg-[#181614] text-[#faf7f2] px-4 py-3 rounded-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-md border border-[#2d2925] w-full"
               >
                 <div className="flex items-center gap-2.5">
                   <span className="w-2 h-2 rounded-full bg-[#d4af37] animate-pulse" />
@@ -1259,23 +1462,76 @@ export const AdminOverviewScreen: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
                   <button
                     onClick={handleDownloadOverviewBatchLabels}
                     disabled={isBatchDownloadingOverview}
-                    className="px-3 py-1.5 bg-[#8c562e] hover:bg-[#a66838] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                    className="px-3.5 py-2 bg-[#8c562e] hover:bg-[#a66838] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
                   >
-                    <Download className="w-3 h-3 text-[#d4af37]" />
+                    <Download className="w-3.5 h-3.5 text-[#d4af37]" />
                     <span>Download {selectedOverviewOrderIds.length} PDF Labels</span>
                   </button>
+
+                  {/* Export Delhivery Excel (.xlsx) for selected orders */}
+                  <button
+                    onClick={() => {
+                      const targetOrders = orders.filter(o => selectedOverviewOrderIds.includes(o.id));
+                      exportOrdersCSV(targetOrders);
+                    }}
+                    className="px-3.5 py-2 bg-[#25211d] hover:bg-[#38332e] text-[#faf7f2] text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors cursor-pointer border border-[#443d35]"
+                    title="Export selected orders to Delhivery Excel (.xlsx)"
+                  >
+                    <FileDown className="w-3.5 h-3.5 text-[#d4af37]" />
+                    <span>Export CSV ({selectedOverviewOrderIds.length})</span>
+                  </button>
+
+                  {/* Update Status dropdown + Apply button */}
+                  <div className="flex items-center gap-1.5 bg-[#25211d] p-1.5 border border-[#443d35] rounded-xs shadow-inner">
+                    <label htmlFor="bulk-status-overview-banner-select" className="text-[11px] font-semibold text-[#d4af37] uppercase tracking-wider px-1.5 whitespace-nowrap">
+                      Update Status:
+                    </label>
+                    <select
+                      id="bulk-status-overview-banner-select"
+                      value={bulkOverviewFulfillmentStatus}
+                      onChange={(e) => setBulkOverviewFulfillmentStatus(e.target.value as FulfillmentStatus)}
+                      disabled={isBulkOverviewUpdating}
+                      className="bg-[#181614] border border-[#554c43] text-white text-xs font-semibold py-1.5 px-2.5 rounded-xs focus:outline-hidden focus:border-[#d4af37] cursor-pointer disabled:opacity-50"
+                      title="Select fulfillment status to apply"
+                    >
+                      <option value="PROCESSING">Processing</option>
+                      <option value="CRAFTING">Crafting</option>
+                      <option value="SHIPPED">Shipped</option>
+                      <option value="DELIVERED">Delivered</option>
+                      <option value="CANCELLED">Cancelled</option>
+                    </select>
+                    <button
+                      id="bulk-status-overview-banner-apply-btn"
+                      onClick={() => handleApplyOverviewBulkStatus()}
+                      disabled={isBulkOverviewUpdating}
+                      className="px-3 py-1.5 bg-[#8c562e] hover:bg-[#a66838] text-white text-xs font-bold uppercase tracking-wider rounded-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-xs"
+                    >
+                      {isBulkOverviewUpdating ? (
+                        <>
+                          <RefreshCw className="w-3 h-3 animate-spin text-white" />
+                          <span>Applying...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-[#d4af37]" />
+                          <span>Apply</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
                   <button
                     onClick={() => setSelectedOverviewOrderIds([])}
-                    className="px-2.5 py-1.5 bg-[#2a2622] hover:bg-[#38332e] text-[#a8a199] hover:text-white text-xs font-medium uppercase tracking-wider rounded-xs transition-colors cursor-pointer"
+                    className="px-3 py-2 bg-[#2a2622] hover:bg-[#38332e] text-[#a8a199] hover:text-white text-xs font-medium uppercase tracking-wider rounded-xs transition-colors cursor-pointer"
                   >
                     Clear Selection
                   </button>
                 </div>
-              </motion.div>
+              </div>
             )}
 
             {/* Search & Filters */}
@@ -1293,7 +1549,7 @@ export const AdminOverviewScreen: React.FC = () => {
 
               <div className="flex items-center space-x-2 w-full sm:w-auto overflow-x-auto">
                 <span className="text-xs text-[#8c857d] uppercase tracking-wider mr-1">Status:</span>
-                {['All', 'CRAFTING', 'SHIPPED', 'PROCESSING', 'DELIVERED'].map(st => (
+                {['All', 'PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED'].map(st => (
                   <button
                     key={st}
                     onClick={() => setOrderStatusFilter(st)}
@@ -1763,6 +2019,29 @@ export const AdminOverviewScreen: React.FC = () => {
           </motion.div>
         )}
 
+        {/* ===================== TAB: RETURNS & REFUNDS ===================== */}
+        {activeTab === 'returns' && (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="space-y-6"
+          >
+            <div className="pb-4 border-b border-[#e4dcd0] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <h1 className="font-serif-luxury text-3xl font-bold text-[#181614]">
+                  Returns & Refunds Desk
+                </h1>
+                <p className="text-xs sm:text-sm text-[#78716c] mt-0.5">
+                  Reverse logistics, unboxing video approvals, physical inspection logging, and automated/manual refunds.
+                </p>
+              </div>
+            </div>
+
+            <AdminReturnsManagement />
+          </motion.div>
+        )}
+
         {/* ===================== TAB 5: ATELIER SETTINGS ===================== */}
         {activeTab === 'settings' && (
           <motion.div 
@@ -2024,8 +2303,8 @@ export const AdminOverviewScreen: React.FC = () => {
                 {/* Status Update Controls */}
                 <div className="p-4 bg-[#f6f2ea] border border-[#ded5c7] rounded-xs space-y-3">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-[#181614]">Update Fulfillment Status</h4>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {['PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED'].map(st => (
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    {['PROCESSING', 'CRAFTING', 'SHIPPED', 'DELIVERED', 'CANCELLED'].map(st => (
                       <button
                         key={st}
                         onClick={() => {
@@ -2304,6 +2583,238 @@ export const AdminOverviewScreen: React.FC = () => {
                       <span>Remove Piece</span>
                     </>
                   )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Custom Date Range Picker Modal */}
+        {isCustomDateModalOpen && (
+          <div 
+            id="custom-date-modal-overlay"
+            className="fixed inset-0 bg-[#181614]/70 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto"
+            onClick={() => setIsCustomDateModalOpen(false)}
+          >
+            <motion.div
+              id="custom-date-modal-container"
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              transition={{ duration: 0.2 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-[#faf7f2] border border-[#d4af37]/30 rounded-xs shadow-2xl max-w-lg w-full p-6 sm:p-7 space-y-5 text-[#181614]"
+            >
+              {/* Modal Header */}
+              <div className="flex items-start justify-between border-b border-[#e4dcd0] pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-[#f6f2ea] border border-[#8c562e]/30 flex items-center justify-center text-[#8c562e] shadow-2xs">
+                    <Calendar className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-serif-luxury text-xl font-bold text-[#181614]">
+                        Custom Date Range
+                      </h3>
+                      <span className="text-[10px] uppercase tracking-widest font-semibold px-2 py-0.5 bg-[#8c562e]/10 text-[#8c562e] border border-[#8c562e]/20 rounded-full">
+                        Atelier Filter
+                      </span>
+                    </div>
+                    <p className="text-xs text-[#78716c] mt-0.5">
+                      Select an inclusive start and end date to filter orders and atelier metrics.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  id="custom-date-close-btn"
+                  onClick={() => setIsCustomDateModalOpen(false)}
+                  className="text-[#8c857d] hover:text-[#181614] p-1.5 rounded-full hover:bg-[#ede5d8] transition-colors cursor-pointer"
+                  aria-label="Close date range picker"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Visual Range Display Card ("Start Date → End Date") */}
+              <div className="bg-white p-4 rounded-xs border border-[#e4dcd0] shadow-2xs space-y-2">
+                <div className="flex items-center justify-between text-xs text-[#78716c] font-medium">
+                  <span className="uppercase tracking-wider text-[10px] font-bold">Selected Filter Window</span>
+                  <span className="font-mono text-[11px] text-[#8c562e] font-semibold">
+                    {tempStartDate && tempEndDate && tempEndDate >= tempStartDate
+                      ? `${Math.round((new Date(tempEndDate).getTime() - new Date(tempStartDate).getTime()) / (1000 * 60 * 60 * 24)) + 1} Day(s) Inclusive`
+                      : 'Select valid range'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-center gap-2 sm:gap-3 py-1 font-serif-luxury text-sm sm:text-base font-bold text-[#181614]">
+                  <span className="bg-[#faf7f2] px-3 py-1.5 rounded-xs border border-[#e4dcd0]">
+                    {tempStartDate ? formatDisplayDate(tempStartDate) : 'Start Date'}
+                  </span>
+                  <span className="text-[#8c562e] font-sans font-bold text-sm sm:text-base">→</span>
+                  <span className="bg-[#faf7f2] px-3 py-1.5 rounded-xs border border-[#e4dcd0]">
+                    {tempEndDate ? formatDisplayDate(tempEndDate) : 'End Date'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-semibold text-[#78716c] uppercase tracking-wider block">
+                  Quick Presets
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    {
+                      label: 'Today',
+                      getDates: () => {
+                        const str = new Date().toISOString().split('T')[0];
+                        return { start: str, end: str };
+                      }
+                    },
+                    {
+                      label: 'Yesterday',
+                      getDates: () => {
+                        const d = new Date();
+                        d.setDate(d.getDate() - 1);
+                        const str = d.toISOString().split('T')[0];
+                        return { start: str, end: str };
+                      }
+                    },
+                    {
+                      label: 'Last 14 Days',
+                      getDates: () => {
+                        const now = new Date();
+                        const past = new Date();
+                        past.setDate(now.getDate() - 13);
+                        return { start: past.toISOString().split('T')[0], end: now.toISOString().split('T')[0] };
+                      }
+                    },
+                    {
+                      label: 'This Month',
+                      getDates: () => {
+                        const now = new Date();
+                        const start = new Date(now.getFullYear(), now.getMonth(), 1);
+                        return { start: start.toISOString().split('T')[0], end: now.toISOString().split('T')[0] };
+                      }
+                    },
+                    {
+                      label: 'Previous Month',
+                      getDates: () => {
+                        const now = new Date();
+                        const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+                        const end = new Date(now.getFullYear(), now.getMonth(), 0);
+                        return { start: start.toISOString().split('T')[0], end: end.toISOString().split('T')[0] };
+                      }
+                    },
+                    {
+                      label: 'Year to Date',
+                      getDates: () => {
+                        const now = new Date();
+                        const start = new Date(now.getFullYear(), 0, 1);
+                        return { start: start.toISOString().split('T')[0], end: now.toISOString().split('T')[0] };
+                      }
+                    },
+                  ].map(preset => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => {
+                        const { start, end } = preset.getDates();
+                        setTempStartDate(start);
+                        setTempEndDate(end);
+                        setCustomDateError(null);
+                      }}
+                      className="px-2.5 py-1 text-xs bg-white hover:bg-[#8c562e] text-[#554e47] hover:text-white border border-[#ded5c7] hover:border-[#8c562e] rounded-xs transition-colors cursor-pointer font-medium"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Date Input Pickers */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label htmlFor="custom-date-start-input" className="text-xs font-semibold text-[#181614] uppercase tracking-wider block">
+                    Start Date <span className="text-[#8c562e]">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    id="custom-date-start-input"
+                    value={tempStartDate}
+                    max={tempEndDate || undefined}
+                    onChange={e => {
+                      setTempStartDate(e.target.value);
+                      setCustomDateError(null);
+                    }}
+                    className="w-full px-3.5 py-2.5 bg-white border border-[#ded5c7] focus:border-[#8c562e] focus:ring-1 focus:ring-[#8c562e] rounded-xs text-xs text-[#181614] outline-none transition-all shadow-2xs"
+                  />
+                  <span className="text-[10px] text-[#8c857d] block">Includes start of day (00:00:00)</span>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label htmlFor="custom-date-end-input" className="text-xs font-semibold text-[#181614] uppercase tracking-wider block">
+                    End Date <span className="text-[#8c562e]">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    id="custom-date-end-input"
+                    value={tempEndDate}
+                    min={tempStartDate || undefined}
+                    onChange={e => {
+                      setTempEndDate(e.target.value);
+                      setCustomDateError(null);
+                    }}
+                    className="w-full px-3.5 py-2.5 bg-white border border-[#ded5c7] focus:border-[#8c562e] focus:ring-1 focus:ring-[#8c562e] rounded-xs text-xs text-[#181614] outline-none transition-all shadow-2xs"
+                  />
+                  <span className="text-[10px] text-[#8c857d] block">Includes end of day (23:59:59)</span>
+                </div>
+              </div>
+
+              {/* Validation Error Message */}
+              {customDateError && (
+                <motion.div
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="flex items-center gap-2 bg-[#fef2f2] border border-[#f87171]/40 text-[#991b1b] px-3.5 py-2.5 rounded-xs text-xs"
+                >
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-[#dc2626]" />
+                  <span>{customDateError}</span>
+                </motion.div>
+              )}
+
+              {/* Action Buttons: Apply and Cancel */}
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-[#e4dcd0]">
+                <button
+                  type="button"
+                  id="custom-date-cancel-btn"
+                  onClick={() => setIsCustomDateModalOpen(false)}
+                  className="px-4 py-2.5 bg-white hover:bg-[#ede5d8] border border-[#ded5c7] text-[#554e47] hover:text-[#181614] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="button"
+                  id="custom-date-apply-btn"
+                  onClick={() => {
+                    if (!tempStartDate || !tempEndDate) {
+                      setCustomDateError('Both Start Date and End Date are required.');
+                      return;
+                    }
+                    if (tempEndDate < tempStartDate) {
+                      setCustomDateError('End Date cannot be earlier than Start Date.');
+                      return;
+                    }
+                    setAppliedCustomRange({ startDate: tempStartDate, endDate: tempEndDate });
+                    setTimeRange('Custom Dates');
+                    setIsCustomDateModalOpen(false);
+                    setCustomDateError(null);
+                    showToast(`Applied custom date range: ${formatDisplayDate(tempStartDate)} – ${formatDisplayDate(tempEndDate)}`);
+                  }}
+                  className="px-5 py-2.5 bg-[#8c562e] hover:bg-[#734320] text-white text-xs font-bold uppercase tracking-wider rounded-xs shadow-xs transition-colors cursor-pointer flex items-center gap-2"
+                >
+                  <Check className="w-3.5 h-3.5 text-[#d4af37]" />
+                  <span>Apply Date Range</span>
                 </button>
               </div>
             </motion.div>
