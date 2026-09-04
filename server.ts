@@ -537,6 +537,12 @@ async function requireAdmin(req: express.Request, res: express.Response, next: e
   next();
 }
 
+// Helper to safely sanitize environment keys
+const cleanEnvKey = (key?: string): string | undefined => {
+  if (!key) return undefined;
+  return key.trim().replace(/^["']|["']$/g, '');
+};
+
 // ================= MAIN SERVER PROCESS =================
 async function startServer() {
   const app = express();
@@ -559,7 +565,7 @@ async function startServer() {
     if (reqHeaders) {
       res.setHeader('Access-Control-Allow-Headers', reqHeaders);
     } else {
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, baggage, sentry-trace');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, baggage, sentry-trace, x-razorpay-signature');
     }
     res.setHeader('Access-Control-Max-Age', '86400');
 
@@ -576,7 +582,7 @@ async function startServer() {
   });
 
   // 1. HTTP Security Headers with Helmet & tailored Content Security Policy
-  // Configured specifically to maintain full compatibility with Razorpay Checkout modal, Supabase client/storage, Google Fonts, and AI Studio preview
+  // Configured specifically to maintain full compatibility with Razorpay Checkout modal, bank Netbanking popups, Supabase client/storage, Google Fonts, and AI Studio preview
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -588,6 +594,7 @@ async function startServer() {
             "'unsafe-eval'",
             'https://checkout.razorpay.com',
             'https://api.razorpay.com',
+            'https://*.razorpay.com',
           ],
           scriptSrcAttr: ["'unsafe-inline'"],
           styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
@@ -604,6 +611,7 @@ async function startServer() {
             'https://checkout.razorpay.com',
             'https://lumberjack.razorpay.com',
             'https://lumberjack-cx.razorpay.com',
+            'https://*.razorpay.com',
           ],
           frameSrc: [
             "'self'",
@@ -620,9 +628,14 @@ async function startServer() {
           ],
           objectSrc: ["'none'"],
           baseUri: ["'self'"],
-          formAction: ["'self'", 'https://api.razorpay.com'],
+          formAction: [
+            "'self'",
+            'https://api.razorpay.com',
+            'https://*.razorpay.com',
+          ],
         },
       },
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' }, // Critical: Allows Razorpay to open bank Netbanking popup windows without browser severing window or forcing about:blank
       crossOriginEmbedderPolicy: false,
       crossOriginResourcePolicy: { policy: 'cross-origin' },
       frameguard: false, // Clickjacking protection handled via CSP frameAncestors for seamless preview support
@@ -700,7 +713,14 @@ async function startServer() {
 
   app.use('/api/', globalApiLimiter);
 
-  app.use(express.json({ limit: '25mb' }));
+  app.use(
+    express.json({
+      limit: '25mb',
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    })
+  );
   app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
   // In-memory product cache synced with database
@@ -1475,30 +1495,38 @@ async function startServer() {
 
   // 12. GET Public Razorpay Key ID (Public)
   app.get(['/api/payments/key', '/payments/key'], (req, res) => {
-    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+    const keyId = cleanEnvKey(process.env.RAZORPAY_KEY_ID);
+    const keySecret = cleanEnvKey(process.env.RAZORPAY_KEY_SECRET);
     if (!keyId) {
       return res.status(500).json({
         success: false,
         error: 'RAZORPAY_KEY_ID environment variable is not configured on the server.',
       });
     }
+    const isTestMode = keyId.startsWith('rzp_test_');
+    const isLiveMode = keyId.startsWith('rzp_live_');
     res.json({
       success: true,
       keyId,
-      isTestMode: keyId.startsWith('rzp_test_'),
+      isTestMode,
+      isLiveMode,
+      hasSecretConfigured: Boolean(keySecret),
     });
   });
 
   // 13. Razorpay Order Creation Endpoint (Public / Customer)
   // Support GET & HEAD probes for route verification, health monitoring, and deployment checks
   app.get(['/api/payments/create-order', '/payments/create-order'], (req, res) => {
-    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+    const keyId = cleanEnvKey(process.env.RAZORPAY_KEY_ID);
+    const keySecret = cleanEnvKey(process.env.RAZORPAY_KEY_SECRET);
     res.json({
       success: true,
       endpoint: '/api/payments/create-order',
       method: 'POST',
       configured: Boolean(keyId),
+      hasSecretConfigured: Boolean(keySecret),
       isTestMode: keyId ? keyId.startsWith('rzp_test_') : true,
+      isLiveMode: keyId ? keyId.startsWith('rzp_live_') : false,
       message: 'Razorpay order creation endpoint is active. Send a POST request with order parameters.',
     });
   });
@@ -1566,8 +1594,8 @@ async function startServer() {
         return res.status(400).json({ error: 'Valid payment amount is required' });
       }
 
-      const keyId = process.env.RAZORPAY_KEY_ID?.trim();
-      const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+      const keyId = cleanEnvKey(process.env.RAZORPAY_KEY_ID);
+      const keySecret = cleanEnvKey(process.env.RAZORPAY_KEY_SECRET);
 
       if (!keyId || !keySecret) {
         return res.status(500).json({
@@ -1603,9 +1631,13 @@ async function startServer() {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
+        let customHint = '';
+        if (response.status === 401) {
+          customHint = ' (Authentication failed with Razorpay. Please verify that RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET match and are from the same mode.)';
+        }
         return res.status(response.status).json({
           success: false,
-          error: errorData.error?.description || 'Failed to create Razorpay order',
+          error: `${errorData.error?.description || 'Failed to create Razorpay order'}${customHint}`,
           details: errorData,
         });
       }
@@ -1627,6 +1659,7 @@ async function startServer() {
         receipt: orderData.receipt,
         status: orderData.status,
         isTestMode: keyId.startsWith('rzp_test_'),
+        isLiveMode: keyId.startsWith('rzp_live_'),
         notes: orderData.notes,
       });
     } catch (err: any) {
@@ -1637,7 +1670,7 @@ async function startServer() {
   // 14. GET Fetch Enabled Razorpay Payment Methods (Public)
   app.get(['/api/payments/methods', '/payments/methods'], async (req, res) => {
     try {
-      const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+      const keyId = cleanEnvKey(process.env.RAZORPAY_KEY_ID);
       if (!keyId) {
         return res.status(500).json({
           success: false,
@@ -1649,6 +1682,7 @@ async function startServer() {
       res.json({
         keyId,
         isTestMode: keyId.startsWith('rzp_test_'),
+        isLiveMode: keyId.startsWith('rzp_live_'),
         methods: data,
       });
     } catch (err: any) {
@@ -1684,7 +1718,7 @@ async function startServer() {
 
       const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = validation.data;
 
-      const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+      const keySecret = cleanEnvKey(process.env.RAZORPAY_KEY_SECRET);
       if (!keySecret) {
         return res.status(500).json({
           success: false,
@@ -1719,6 +1753,94 @@ async function startServer() {
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Internal server error' });
+    }
+  });
+
+  // 15b. POST Razorpay Webhook (Server-to-Server Asynchronous Confirmation)
+  // Receives payment.captured, order.paid, and payment.failed events directly from Razorpay
+  app.post(['/api/payments/webhook', '/api/webhooks/razorpay'], async (req, res) => {
+    const signature = (req.headers['x-razorpay-signature'] as string) || '';
+    const webhookSecret = cleanEnvKey(process.env.RAZORPAY_WEBHOOK_SECRET);
+
+    if (webhookSecret) {
+      if (!signature) {
+        console.warn('⚠️ Webhook received without x-razorpay-signature header');
+        return res.status(400).json({ error: 'Missing x-razorpay-signature header' });
+      }
+
+      const rawBody = (req as any).rawBody ? (req as any).rawBody.toString('utf8') : JSON.stringify(req.body);
+      const expectedSignature = crypto
+        .createHmac('sha256', webhookSecret)
+        .update(rawBody)
+        .digest('hex');
+
+      const isMatch =
+        expectedSignature.length === signature.length &&
+        crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(signature));
+
+      if (!isMatch) {
+        console.error('❌ Invalid Razorpay webhook signature');
+        return res.status(400).json({ error: 'Invalid webhook signature' });
+      }
+    } else {
+      console.warn('⚠️ RAZORPAY_WEBHOOK_SECRET is not configured on server. Proceeding without signature verification.');
+    }
+
+    const event = req.body?.event;
+    const payload = req.body?.payload;
+
+    console.log(`🔔 Razorpay Webhook received: ${event}`, {
+      paymentId: payload?.payment?.entity?.id,
+      orderId: payload?.payment?.entity?.order_id,
+      amount: payload?.payment?.entity?.amount,
+      status: payload?.payment?.entity?.status,
+    });
+
+    try {
+      if (event === 'payment.captured' || event === 'order.paid') {
+        const paymentEntity = payload?.payment?.entity;
+        const razorpayOrderId = paymentEntity?.order_id;
+        const razorpayPaymentId = paymentEntity?.id;
+
+        if (razorpayOrderId) {
+          // Update in-memory orders
+          const existingOrder = orders.find(
+            o => o.razorpayOrderId === razorpayOrderId || o.id === paymentEntity?.notes?.order_id
+          );
+          if (existingOrder) {
+            existingOrder.paymentStatus = 'Paid';
+            existingOrder.razorpayPaymentId = razorpayPaymentId;
+            existingOrder.fulfillmentStatus = 'PROCESSING';
+          }
+
+          // Update Supabase orders if configured
+          const serviceSupabase = getServiceSupabase();
+          if (serviceSupabase) {
+            await serviceSupabase
+              .from('orders')
+              .update({
+                payment_status: 'paid',
+                razorpay_payment_id: razorpayPaymentId,
+                fulfillment_status: 'processing',
+                updated_at: new Date().toISOString(),
+              })
+              .or(`razorpay_order_id.eq.${razorpayOrderId},id.eq.${paymentEntity?.notes?.order_id}`);
+          }
+        }
+      } else if (event === 'payment.failed') {
+        const paymentEntity = payload?.payment?.entity;
+        console.warn('Razorpay payment failed event received:', {
+          paymentId: paymentEntity?.id,
+          orderId: paymentEntity?.order_id,
+          errorDescription: paymentEntity?.error_description,
+        });
+      }
+
+      // Always return HTTP 200 OK so Razorpay acknowledges receipt
+      res.status(200).json({ status: 'ok', received: true });
+    } catch (err: any) {
+      console.error('Error processing Razorpay webhook:', err);
+      res.status(500).json({ error: 'Failed to process webhook event' });
     }
   });
 

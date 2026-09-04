@@ -37,6 +37,13 @@ export async function fetchRazorpayPublicKey(): Promise<string> {
   } catch (e) {
     console.warn('Failed to fetch Razorpay public key ID from server:', e);
   }
+
+  // Fallback to client-side Vite environment variable if configured
+  const clientEnvKey = (import.meta as any).env?.VITE_RAZORPAY_KEY_ID;
+  if (clientEnvKey && typeof clientEnvKey === 'string' && clientEnvKey.trim()) {
+    return clientEnvKey.trim();
+  }
+
   throw new Error('Razorpay public key ID is not configured on the server. Please set RAZORPAY_KEY_ID in environment variables.');
 }
 
@@ -442,10 +449,16 @@ export async function launchRazorpayCheckout(options: OpenRazorpayOptions): Prom
           },
         },
       },
+      retry: {
+        enabled: true,
+        max_count: 3,
+      },
       modal: {
         backdropclose: false,
         escape: true,
         handleback: true,
+        confirm_close: true,
+        animation: true,
         ondismiss: () => {
           console.log('Razorpay modal dismissed by user');
           if (onDismiss) onDismiss();
@@ -483,8 +496,20 @@ export async function launchRazorpayCheckout(options: OpenRazorpayOptions): Prom
 
     razorpayInstance.on('payment.failed', (failedResponse: any) => {
       console.error('Razorpay payment transaction failed:', failedResponse);
-      const errMsg = failedResponse?.error?.description || failedResponse?.error?.reason || 'Payment was declined or cancelled.';
-      onError(new Error(errMsg));
+      const rawDesc = failedResponse?.error?.description || failedResponse?.error?.reason || '';
+      let userFriendlyMsg = rawDesc;
+      if (
+        !rawDesc ||
+        rawDesc.toLowerCase().includes('bank') ||
+        rawDesc.toLowerCase().includes('declined') ||
+        rawDesc.toLowerCase().includes('another method') ||
+        rawDesc.toLowerCase().includes('popup') ||
+        rawDesc.toLowerCase().includes('cancelled') ||
+        rawDesc.toLowerCase().includes('timeout')
+      ) {
+        userFriendlyMsg = 'Bank payment was interrupted or declined. Please try UPI, card, or another bank.';
+      }
+      onError(new Error(userFriendlyMsg));
     });
 
     // Open the Razorpay Checkout Modal

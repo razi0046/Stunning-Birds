@@ -10,6 +10,7 @@
     Header set Access-Control-Allow-Origin "*"
     Header set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     Header set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Origin"
+    Header set Cross-Origin-Opener-Policy "same-origin-allow-popups"
   </IfModule>
 
   # 2. Respond immediately to OPTIONS preflight requests

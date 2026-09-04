@@ -243,8 +243,20 @@ export const CheckoutScreen: React.FC = () => {
         onError: (error: any) => {
           // On Payment Failure or Cancel: DO NOT insert anything into Supabase or orders state.
           setIsSubmitting(false);
-          const errorMsg = error?.description || error?.message || 'Payment transaction was declined or failed.';
-          setPaymentError(errorMsg + ' Your cart and applied discounts have been retained. You can retry with another payment method.');
+          const rawMsg = error?.description || error?.message || '';
+          let friendlyMsg = rawMsg;
+          if (
+            !rawMsg ||
+            rawMsg.toLowerCase().includes('bank') ||
+            rawMsg.toLowerCase().includes('declined') ||
+            rawMsg.toLowerCase().includes('another method') ||
+            rawMsg.toLowerCase().includes('popup') ||
+            rawMsg.toLowerCase().includes('cancelled') ||
+            rawMsg.toLowerCase().includes('failed')
+          ) {
+            friendlyMsg = 'Payment could not be completed with this bank method. Please try UPI, card, or another bank.';
+          }
+          setPaymentError(friendlyMsg + ' Your cart and applied discounts have been retained.');
         },
         onDismiss: () => {
           // On Checkout Dismiss: DO NOT insert anything into Supabase. Keep customer on checkout.
