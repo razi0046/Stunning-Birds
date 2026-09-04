@@ -3,6 +3,7 @@ dotenv.config();
 
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -1264,7 +1265,11 @@ async function startServer() {
   }
 
   // 10.1 POST Validate Coupon (Public / Customer)
-  app.post('/api/coupons/validate', couponLimiter, async (req, res) => {
+  app.options(['/api/coupons/validate', '/coupons/validate'], (req, res) => {
+    res.status(204).end();
+  });
+
+  app.post(['/api/coupons/validate', '/coupons/validate'], couponLimiter, async (req, res) => {
     try {
       const validation = CouponValidateSchema.safeParse(req.body);
       if (!validation.success) {
@@ -1470,7 +1475,7 @@ async function startServer() {
   // ================= RAZORPAY PAYMENT ENDPOINTS =================
 
   // 12. GET Public Razorpay Key ID (Public)
-  app.get('/api/payments/key', (req, res) => {
+  app.get(['/api/payments/key', '/payments/key'], (req, res) => {
     const keyId = process.env.RAZORPAY_KEY_ID?.trim();
     if (!keyId) {
       return res.status(500).json({
@@ -1485,9 +1490,30 @@ async function startServer() {
     });
   });
 
-  // 13. POST Create Razorpay Order (Public / Customer)
+  // 13. Razorpay Order Creation Endpoint (Public / Customer)
+  // Support GET & HEAD probes for route verification, health monitoring, and deployment checks
+  app.get(['/api/payments/create-order', '/payments/create-order'], (req, res) => {
+    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+    res.json({
+      success: true,
+      endpoint: '/api/payments/create-order',
+      method: 'POST',
+      configured: Boolean(keyId),
+      isTestMode: keyId ? keyId.startsWith('rzp_test_') : true,
+      message: 'Razorpay order creation endpoint is active. Send a POST request with order parameters.',
+    });
+  });
+
+  app.head(['/api/payments/create-order', '/payments/create-order'], (req, res) => {
+    res.status(200).end();
+  });
+
+  app.options(['/api/payments/create-order', '/payments/create-order'], (req, res) => {
+    res.status(204).end();
+  });
+
   // SERVER-SIDE VALIDATION: Independently calculates payable amount & verifies coupon
-  app.post('/api/payments/create-order', paymentLimiter, async (req, res) => {
+  app.post(['/api/payments/create-order', '/payments/create-order'], paymentLimiter, async (req, res) => {
     try {
       const validation = RazorpayCreateOrderSchema.safeParse(req.body);
       if (!validation.success) {
@@ -1606,7 +1632,7 @@ async function startServer() {
   });
 
   // 14. GET Fetch Enabled Razorpay Payment Methods (Public)
-  app.get('/api/payments/methods', async (req, res) => {
+  app.get(['/api/payments/methods', '/payments/methods'], async (req, res) => {
     try {
       const keyId = process.env.RAZORPAY_KEY_ID?.trim();
       if (!keyId) {
@@ -1628,7 +1654,20 @@ async function startServer() {
   });
 
   // 15. POST Verify Razorpay Payment Signature (Public / Customer)
-  app.post('/api/payments/verify', paymentLimiter, (req, res) => {
+  app.get(['/api/payments/verify', '/payments/verify'], (req, res) => {
+    res.json({
+      success: true,
+      endpoint: '/api/payments/verify',
+      method: 'POST',
+      message: 'Razorpay payment verification endpoint is active. Use POST with payment signature parameters.',
+    });
+  });
+
+  app.options(['/api/payments/verify', '/payments/verify'], (req, res) => {
+    res.status(204).end();
+  });
+
+  app.post(['/api/payments/verify', '/payments/verify'], paymentLimiter, (req, res) => {
     try {
       const validation = RazorpayVerifySchema.safeParse(req.body);
       if (!validation.success) {
@@ -3742,7 +3781,11 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = fs.existsSync(path.join(process.cwd(), 'dist'))
+      ? path.join(process.cwd(), 'dist')
+      : fs.existsSync(path.join(__dirname, 'dist'))
+      ? path.join(__dirname, 'dist')
+      : __dirname;
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

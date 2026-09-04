@@ -140,7 +140,7 @@ export async function validateCouponCode(params: {
   return data;
 }
 
-// 2. Create Razorpay Order via Server API or Supabase Edge Function
+// 2. Create Razorpay Order via Express Server API
 export async function createRazorpayOrder(
   params: CreateOrderParams
 ): Promise<RazorpayOrderResponse> {
@@ -154,67 +154,39 @@ export async function createRazorpayOrder(
     headers['Authorization'] = `Bearer ${session.access_token}`;
   }
 
-  // 1. Primary: Call Express backend endpoint /api/payments/create-order
-  try {
-    const response = await fetch(getApiUrl('/api/payments/create-order'), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        amount,
-        subtotal,
-        couponCode,
-        currency,
-        receipt: receipt || `rcpt_${Date.now()}`,
-        customer,
-        notes: {
-          brand: 'STUNNING BIRDS ATELIER',
-          ...notes,
-        },
-      }),
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      if (data && data.success && data.orderId) {
-        return data as RazorpayOrderResponse;
-      }
-    } else {
-      const errData = await response.json().catch(() => ({}));
-      console.warn('Backend /api/payments/create-order returned error:', errData);
-      if (errData?.error) {
-        throw new Error(errData.error);
-      }
-    }
-  } catch (apiErr: any) {
-    console.warn('Backend API create-order error:', apiErr);
-    if (apiErr?.message && !apiErr.message.includes('network')) {
-      throw apiErr;
-    }
-  }
-
-  // 2. Secondary: Call Supabase Edge Function 'create-razorpay-order'
-  try {
-    const { data, error } = await supabase.functions.invoke('create-razorpay-order', {
-      body: {
-        amount,
-        currency,
-        receipt: receipt || `rcpt_${Date.now()}`,
-        customer,
-        notes: {
-          brand: 'STUNNING BIRDS ATELIER',
-          ...notes,
-        },
+  // Call Express backend endpoint /api/payments/create-order
+  const response = await fetch(getApiUrl('/api/payments/create-order'), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      amount,
+      subtotal,
+      couponCode,
+      currency,
+      receipt: receipt || `rcpt_${Date.now()}`,
+      customer,
+      notes: {
+        brand: 'STUNNING BIRDS ATELIER',
+        ...notes,
       },
-    });
+    }),
+  });
 
-    if (!error && data && data.success && data.orderId) {
+  if (response.ok) {
+    const data = await response.json().catch(() => null);
+    if (data && data.success && data.orderId) {
       return data as RazorpayOrderResponse;
     }
-  } catch (supabaseErr) {
-    console.warn('Supabase Edge Function create-razorpay-order error:', supabaseErr);
+    throw new Error(data?.error || 'Invalid response structure received from payment server.');
   }
 
-  throw new Error('Could not create Razorpay payment order. Please verify your connection or try again.');
+  const errData = await response.json().catch(() => ({}));
+  const errorMessage =
+    errData?.error ||
+    errData?.message ||
+    `Payment server error (${response.status}: ${response.statusText || 'Failed to create order'}).`;
+  console.error('Backend /api/payments/create-order error:', errorMessage, errData);
+  throw new Error(errorMessage);
 }
 
 export interface VerifyPaymentParams {
@@ -224,49 +196,31 @@ export interface VerifyPaymentParams {
   order_id?: string;
 }
 
-// 3. Verify Razorpay Payment Signature on Server
+// 3. Verify Razorpay Payment Signature on Server (Express Backend Only)
 export async function verifyRazorpayPayment(
   params: VerifyPaymentParams
 ): Promise<RazorpayVerificationResponse> {
-  // 1. Primary: Call Express backend endpoint /api/payments/verify
-  try {
-    const response = await fetch(getApiUrl('/api/payments/verify'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
+  const response = await fetch(getApiUrl('/api/payments/verify'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
 
-    if (response.ok) {
-      const data = await response.json();
-      if (data && data.success && data.verified) {
-        return data as RazorpayVerificationResponse;
-      }
-      throw new Error(data.error || 'Payment signature could not be verified.');
-    } else {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(errData.error || 'Payment signature verification failed.');
+  if (response.ok) {
+    const data = await response.json().catch(() => null);
+    if (data && data.success && data.verified) {
+      return data as RazorpayVerificationResponse;
     }
-  } catch (apiErr: any) {
-    console.warn('Backend API verify payment failed, attempting Edge function:', apiErr);
-
-    // 2. Secondary: Call Supabase Edge Function 'verify-razorpay-payment'
-    try {
-      const { data, error } = await supabase.functions.invoke('verify-razorpay-payment', {
-        body: params,
-      });
-
-      if (!error && data && data.success && data.verified) {
-        return data as RazorpayVerificationResponse;
-      }
-      if (data && data.error) {
-        throw new Error(data.error);
-      }
-    } catch (supabaseErr) {
-      console.error('Supabase Edge Function verify-razorpay-payment check failed:', supabaseErr);
-    }
-
-    throw apiErr;
+    throw new Error(data?.error || 'Payment signature verification could not be validated.');
   }
+
+  const errData = await response.json().catch(() => ({}));
+  const errorMessage =
+    errData?.error ||
+    errData?.message ||
+    `Payment signature verification failed (${response.status}: ${response.statusText || 'Verification rejected'}).`;
+  console.error('Backend /api/payments/verify error:', errorMessage, errData);
+  throw new Error(errorMessage);
 }
 
 export interface OpenRazorpayOptions {
