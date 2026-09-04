@@ -10,10 +10,26 @@ import {
   RazorpayVerificationResponse,
 } from '../types';
 
+/**
+ * Resolves API endpoint URL across development, preview, and production environments.
+ * Supports VITE_API_URL / VITE_BACKEND_URL / VITE_APP_URL if defined, otherwise uses relative API paths.
+ */
+export const getApiUrl = (endpoint: string): string => {
+  const envApiUrl = (
+    (import.meta as any).env?.VITE_API_URL ||
+    (import.meta as any).env?.VITE_BACKEND_URL ||
+    (import.meta as any).env?.VITE_APP_URL ||
+    ''
+  ).trim().replace(/\/+$/, '');
+
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  return envApiUrl ? `${envApiUrl}${cleanEndpoint}` : cleanEndpoint;
+};
+
 // Fetch Public Key ID from server /api/payments/key if not provided in order response
 export async function fetchRazorpayPublicKey(): Promise<string> {
   try {
-    const res = await fetch('/api/payments/key');
+    const res = await fetch(getApiUrl('/api/payments/key'));
     if (res.ok) {
       const data = await res.json();
       if (data.keyId) return data.keyId;
@@ -102,7 +118,7 @@ export async function validateCouponCode(params: {
     headers['Authorization'] = `Bearer ${session.access_token}`;
   }
 
-  const response = await fetch('/api/coupons/validate', {
+  const response = await fetch(getApiUrl('/api/coupons/validate'), {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -140,7 +156,7 @@ export async function createRazorpayOrder(
 
   // 1. Primary: Call Express backend endpoint /api/payments/create-order
   try {
-    const response = await fetch('/api/payments/create-order', {
+    const response = await fetch(getApiUrl('/api/payments/create-order'), {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -214,7 +230,7 @@ export async function verifyRazorpayPayment(
 ): Promise<RazorpayVerificationResponse> {
   // 1. Primary: Call Express backend endpoint /api/payments/verify
   try {
-    const response = await fetch('/api/payments/verify', {
+    const response = await fetch(getApiUrl('/api/payments/verify'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),

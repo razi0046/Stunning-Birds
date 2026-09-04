@@ -545,6 +545,36 @@ async function startServer() {
   // Enable trust proxy for reverse proxies (Cloud Run, container ingress, nginx)
   app.set('trust proxy', 1);
 
+  // CORS & Preflight handling for deployed production domain, preview, and local development
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    } else {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    const reqHeaders = req.headers['access-control-request-headers'];
+    if (reqHeaders) {
+      res.setHeader('Access-Control-Allow-Headers', reqHeaders);
+    } else {
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, baggage, sentry-trace');
+    }
+    res.setHeader('Access-Control-Max-Age', '86400');
+
+    // Fast return for preflight requests
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    next();
+  });
+
+  // Explicit OPTIONS preflight handler for all API endpoints
+  app.options('/api/*', (req, res) => {
+    res.status(204).end();
+  });
+
   // 1. HTTP Security Headers with Helmet & tailored Content Security Policy
   // Configured specifically to maintain full compatibility with Razorpay Checkout modal, Supabase client/storage, Google Fonts, and AI Studio preview
   app.use(
