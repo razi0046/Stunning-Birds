@@ -240,9 +240,13 @@ export type OrderItem = Order['items'][number];
 export interface RazorpayOrderResponse {
   success: boolean;
   orderId: string;
+  order_id?: string;
+  id?: string;
   amount: number;
   currency: string;
   keyId: string;
+  key_id?: string;
+  key?: string;
   receipt?: string;
   status?: string;
   isTestMode?: boolean;

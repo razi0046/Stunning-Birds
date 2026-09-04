@@ -173,11 +173,90 @@ export async function createRazorpayOrder(
   });
 
   if (response.ok) {
-    const data = await response.json().catch(() => null);
-    if (data && data.success && data.orderId) {
-      return data as RazorpayOrderResponse;
+    // Check if the response returned an HTML document (such as SPA index.html fallback)
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      const htmlText = await response.text().catch(() => '');
+      console.error('Payment order creation returned HTML instead of JSON:', htmlText.substring(0, 300));
+      throw new Error(
+        'Payment API returned HTML (index.html) instead of order JSON. Please verify that your Node.js backend server is running and handling /api requests.'
+      );
     }
-    throw new Error(data?.error || 'Invalid response structure received from payment server.');
+
+    const rawData = await response.json().catch(() => null);
+    if (!rawData) {
+      throw new Error('Empty or unparseable JSON response received from payment server.');
+    }
+
+    // Extract order ID from any potential field representation (camelCase, snake_case, or nested data)
+    const orderId =
+      rawData.orderId ||
+      rawData.order_id ||
+      rawData.id ||
+      rawData.data?.orderId ||
+      rawData.data?.order_id ||
+      rawData.data?.id ||
+      rawData.order?.id ||
+      rawData.order?.orderId ||
+      '';
+
+    if (orderId) {
+      // Calculate or extract amount in paise for Razorpay Checkout
+      const parsedAmount =
+        rawData.amount ??
+        rawData.data?.amount ??
+        rawData.order?.amount ??
+        (amount ? (amount < 500000 ? Math.round(amount * 100) : Math.round(amount)) : 0);
+
+      // Extract keyId from response or fallback
+      let keyId =
+        rawData.keyId ||
+        rawData.key_id ||
+        rawData.key ||
+        rawData.data?.keyId ||
+        rawData.data?.key_id ||
+        rawData.data?.key ||
+        '';
+
+      if (!keyId) {
+        try {
+          keyId = await fetchRazorpayPublicKey();
+        } catch {
+          // If server /key fails, let launchRazorpayCheckout handle or fallback
+        }
+      }
+
+      const currency =
+        rawData.currency ||
+        rawData.data?.currency ||
+        rawData.order?.currency ||
+        'INR';
+
+      const normalized: RazorpayOrderResponse = {
+        success: true,
+        orderId: String(orderId),
+        order_id: String(orderId),
+        id: String(orderId),
+        amount: Number(parsedAmount),
+        currency: String(currency).toUpperCase(),
+        keyId: String(keyId || ''),
+        key_id: String(keyId || ''),
+        key: String(keyId || ''),
+        receipt: rawData.receipt || rawData.data?.receipt || receipt,
+        status: rawData.status || rawData.data?.status || 'created',
+        isTestMode: rawData.isTestMode ?? rawData.data?.isTestMode ?? true,
+        notes: rawData.notes || rawData.data?.notes || notes,
+      };
+
+      return normalized;
+    }
+
+    const errorMsg =
+      rawData.error ||
+      rawData.message ||
+      rawData.description ||
+      'Invalid response structure received from payment server.';
+    throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
   }
 
   const errData = await response.json().catch(() => ({}));
@@ -276,11 +355,12 @@ export async function launchRazorpayCheckout(options: OpenRazorpayOptions): Prom
       notes,
     });
 
-    if (!orderResponse || !orderResponse.orderId) {
+    const finalOrderId = orderResponse.orderId || orderResponse.order_id || orderResponse.id;
+    if (!orderResponse || !finalOrderId) {
       throw new Error('Failed to generate secure Razorpay order on server.');
     }
 
-    let keyId = orderResponse.keyId;
+    let keyId = orderResponse.keyId || orderResponse.key_id || orderResponse.key;
     if (!keyId) {
       keyId = await fetchRazorpayPublicKey();
     }
@@ -314,7 +394,7 @@ export async function launchRazorpayCheckout(options: OpenRazorpayOptions): Prom
       name: 'STUNNING BIRDS ATELIER',
       description: 'Bespoke Leather Commission',
       image: 'https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=200&q=80',
-      order_id: orderResponse.orderId,
+      order_id: finalOrderId,
       prefill: {
         name: customerName,
         email: customerEmail,
@@ -376,7 +456,7 @@ export async function launchRazorpayCheckout(options: OpenRazorpayOptions): Prom
         try {
           // Cryptographic signature verification on server
           const verificationResult = await verifyRazorpayPayment({
-            razorpay_order_id: response.razorpay_order_id || orderResponse.orderId,
+            razorpay_order_id: response.razorpay_order_id || finalOrderId,
             razorpay_payment_id: response.razorpay_payment_id,
             razorpay_signature: response.razorpay_signature,
             order_id: orderNumber,
@@ -386,7 +466,7 @@ export async function launchRazorpayCheckout(options: OpenRazorpayOptions): Prom
             console.log('Payment verified successfully on server');
             onSuccess({
               razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_order_id: response.razorpay_order_id || orderResponse.orderId,
+              razorpay_order_id: response.razorpay_order_id || finalOrderId,
               razorpay_signature: response.razorpay_signature,
             });
           } else {
