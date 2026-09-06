@@ -58,31 +58,41 @@ serve(async (req: Request) => {
       );
     }
 
-    const isPlaceholderSecret =
-      !RAZORPAY_KEY_SECRET ||
-      RAZORPAY_KEY_SECRET.includes('YOUR_') ||
-      RAZORPAY_KEY_SECRET.includes('PLACEHOLDER');
+    if (!RAZORPAY_KEY_SECRET) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          verified: false,
+          error: 'Payment verification failed: RAZORPAY_KEY_SECRET is not configured on the server.',
+        }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
-    let isValid = false;
+    if (!razorpay_signature) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          verified: false,
+          error: 'Missing mandatory razorpay_signature for payment verification.',
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
-    if (!isPlaceholderSecret && razorpay_signature) {
-      const payload = `${razorpay_order_id}|${razorpay_payment_id}`;
-      const expectedSignature = await generateHmacSha256(RAZORPAY_KEY_SECRET, payload);
-      isValid = expectedSignature === razorpay_signature;
+    const payload = `${razorpay_order_id}|${razorpay_payment_id}`;
+    const expectedSignature = await generateHmacSha256(RAZORPAY_KEY_SECRET, payload);
+    const isValid = expectedSignature === razorpay_signature;
 
-      if (!isValid) {
-        return new Response(
-          JSON.stringify({
-            success: false,
-            verified: false,
-            error: 'Invalid Razorpay payment signature. Payment cannot be verified.',
-          }),
-          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
-    } else {
-      // In Test Mode / Placeholder architecture, accept test verification
-      isValid = true;
+    if (!isValid) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          verified: false,
+          error: 'Invalid Razorpay payment signature. Payment cannot be verified.',
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     // Update order in Supabase database if order_id and credentials are present

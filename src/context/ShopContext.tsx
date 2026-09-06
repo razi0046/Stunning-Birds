@@ -131,6 +131,26 @@ export const saveStoredVariantLinksMap = (map: Record<string, StoredVariantLink>
   } catch {}
 };
 
+export interface StoredProductSeo {
+  seoTitle?: string;
+  seoMetaDescription?: string;
+}
+
+export const getStoredSeoMetadataMap = (): Record<string, StoredProductSeo> => {
+  try {
+    const raw = localStorage.getItem('sb_product_seo_metadata');
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
+export const saveStoredSeoMetadataMap = (map: Record<string, StoredProductSeo>) => {
+  try {
+    localStorage.setItem('sb_product_seo_metadata', JSON.stringify(map));
+  } catch {}
+};
+
 // Helper: map Supabase product record to frontend Product interface
 const mapSupabaseProduct = (p: any): Product => {
   const sellingPrice = p.selling_price !== undefined && p.selling_price !== null 
@@ -144,12 +164,18 @@ const mapSupabaseProduct = (p: any): Product => {
   const storedLink = storedLinksMap[p.id] || storedLinksMap[p.slug];
   const initialMatch = INITIAL_PRODUCTS.find(ip => ip.id === p.id || ip.slug === p.slug);
 
+  const storedSeoMap = getStoredSeoMetadataMap();
+  const storedSeo = storedSeoMap[p.id] || storedSeoMap[p.slug];
+
   const variantGroup = p.variant_group || p.variantGroup || storedLink?.variantGroup || initialMatch?.variantGroup || undefined;
   const linkedVariantIds = Array.isArray(p.linked_variant_ids)
     ? p.linked_variant_ids
     : (Array.isArray(p.linkedVariantIds)
       ? p.linkedVariantIds
       : (storedLink?.linkedVariantIds || initialMatch?.linkedVariantIds || undefined));
+
+  const seoTitle = p.seo_title || p.seoTitle || storedSeo?.seoTitle || initialMatch?.seoTitle || undefined;
+  const seoMetaDescription = p.seo_description || p.seo_meta_description || p.seoMetaDescription || storedSeo?.seoMetaDescription || initialMatch?.seoMetaDescription || undefined;
 
   return {
     id: p.id,
@@ -184,6 +210,10 @@ const mapSupabaseProduct = (p: any): Product => {
     productHighlights: Array.isArray(p.product_highlights) ? p.product_highlights : [],
     variantGroup,
     linkedVariantIds,
+    seoTitle,
+    seo_title: seoTitle,
+    seoMetaDescription,
+    seo_meta_description: seoMetaDescription,
     reviews: Array.isArray(p.product_reviews) ? p.product_reviews.map((r: any) => ({
       id: r.id,
       productId: r.product_id,
@@ -510,17 +540,7 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
         tier: profile?.tier || 'ARTISAN TIER',
         memberSince: profile?.member_since ? `Member since ${new Date(profile.member_since).getFullYear()}` : 'Member since 2025',
         wishlistProductIds: wishlistIds,
-        addresses: formattedAddresses.length > 0 ? formattedAddresses : [
-          {
-            id: `addr-default`,
-            label: 'Primary Residence',
-            addressLine: '123 Artisan Way, Bandra West',
-            city: 'Mumbai',
-            state: 'Maharashtra',
-            pincode: '400050',
-            isDefault: true,
-          }
-        ],
+        addresses: formattedAddresses,
       });
 
       // Synchronize Cart from Supabase (using foreign key joined product or fallback)
@@ -1068,11 +1088,11 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       paymentStatus: 'Pending',
       fulfillmentStatus: 'CRAFTING',
       shippingAddress: orderData.shippingAddress || {
-        phone: '+91 98201 45678',
-        pincode: '400050',
-        city: 'Mumbai',
-        state: 'Maharashtra',
-        addressLine: '123 Artisan Way, Bandra West',
+        phone: '',
+        pincode: '',
+        city: '',
+        state: '',
+        addressLine: '',
       },
       shippingMethod: orderData.shippingMethod || 'Complimentary Express Courier (3-5 Business Days)',
       timeline: [
@@ -1305,11 +1325,11 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       paymentStatus: 'Paid',
       fulfillmentStatus: 'CRAFTING',
       shippingAddress: orderData.shippingAddress || {
-        phone: '+91 98201 45678',
-        pincode: '400050',
-        city: 'Mumbai',
-        state: 'Maharashtra',
-        addressLine: '123 Artisan Way, Bandra West',
+        phone: '',
+        pincode: '',
+        city: '',
+        state: '',
+        addressLine: '',
       },
       shippingMethod: orderData.shippingMethod || 'Complimentary Express Courier (3-5 Business Days)',
       timeline: confirmedTimeline,
@@ -1913,11 +1933,33 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       featured: Boolean(productData.featured),
       isNewArrival: Boolean(productData.isNewArrival),
       productHighlights: productData.productHighlights || [],
+      seoTitle: productData.seoTitle || productData.seo_title,
+      seo_title: productData.seoTitle || productData.seo_title,
+      seoMetaDescription: productData.seoMetaDescription || productData.seo_meta_description,
+      seo_meta_description: productData.seoMetaDescription || productData.seo_meta_description,
       reviews: [],
     };
 
+    // Store SEO metadata locally for instant resilience
+    const effectiveSeoTitle = productData.seoTitle || productData.seo_title;
+    const effectiveSeoDesc = productData.seoMetaDescription || productData.seo_meta_description;
+    if (effectiveSeoTitle || effectiveSeoDesc) {
+      const seoMap = getStoredSeoMetadataMap();
+      seoMap[newProd.id] = {
+        seoTitle: effectiveSeoTitle,
+        seoMetaDescription: effectiveSeoDesc,
+      };
+      if (newProd.slug) {
+        seoMap[newProd.slug] = {
+          seoTitle: effectiveSeoTitle,
+          seoMetaDescription: effectiveSeoDesc,
+        };
+      }
+      saveStoredSeoMetadataMap(seoMap);
+    }
+
     try {
-      const { error: insertErr } = await supabase.from('products').insert({
+      const insertPayload: any = {
         id: newProd.id,
         sku: newProd.sku,
         slug: newProd.slug,
@@ -1943,7 +1985,22 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
         featured: newProd.featured,
         is_new_arrival: newProd.isNewArrival,
         product_highlights: newProd.productHighlights,
-      });
+      };
+
+      if (newProd.seoTitle) {
+        insertPayload.seo_title = newProd.seoTitle;
+      }
+      if (newProd.seoMetaDescription) {
+        insertPayload.seo_description = newProd.seoMetaDescription;
+      }
+
+      let { error: insertErr } = await supabase.from('products').insert(insertPayload);
+      if (insertErr && (insertErr.message?.includes('seo_title') || insertErr.message?.includes('seo_description'))) {
+        delete insertPayload.seo_title;
+        delete insertPayload.seo_description;
+        const retryResult = await supabase.from('products').insert(insertPayload);
+        insertErr = retryResult.error;
+      }
 
       if (insertErr) {
         console.error('Failed to insert product into Supabase:', insertErr);
@@ -2030,6 +2087,12 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (updatedFields.productHighlights !== undefined) supabasePayload.product_highlights = updatedFields.productHighlights;
     if (updatedFields.featured !== undefined) supabasePayload.featured = updatedFields.featured;
     if (updatedFields.isNewArrival !== undefined) supabasePayload.is_new_arrival = updatedFields.isNewArrival;
+    if (updatedFields.seoTitle !== undefined || updatedFields.seo_title !== undefined) {
+      supabasePayload.seo_title = updatedFields.seoTitle || updatedFields.seo_title || null;
+    }
+    if (updatedFields.seoMetaDescription !== undefined || updatedFields.seo_meta_description !== undefined) {
+      supabasePayload.seo_description = updatedFields.seoMetaDescription || updatedFields.seo_meta_description || null;
+    }
 
     let finalImages = updatedFields.images;
     if (updatedFields.images !== undefined) {
@@ -2071,7 +2134,13 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     try {
-      const { error: updateErr } = await supabase.from('products').update(supabasePayload).eq('id', resolvedId);
+      let { error: updateErr } = await supabase.from('products').update(supabasePayload).eq('id', resolvedId);
+      if (updateErr && (updateErr.message?.includes('seo_title') || updateErr.message?.includes('seo_description'))) {
+        delete supabasePayload.seo_title;
+        delete supabasePayload.seo_description;
+        const retryResult = await supabase.from('products').update(supabasePayload).eq('id', resolvedId);
+        updateErr = retryResult.error;
+      }
       if (updateErr) {
         console.error('Failed to update product in Supabase:', updateErr);
         showToast(`Failed to update product in database: ${updateErr.message}`);
@@ -2130,6 +2199,23 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       saveStoredVariantLinksMap(storedMap);
     }
 
+    const nextSeoTitle = updatedFields.seoTitle !== undefined ? updatedFields.seoTitle : (updatedFields.seo_title !== undefined ? updatedFields.seo_title : targetProd?.seoTitle);
+    const nextSeoDesc = updatedFields.seoMetaDescription !== undefined ? updatedFields.seoMetaDescription : (updatedFields.seo_meta_description !== undefined ? updatedFields.seo_meta_description : targetProd?.seoMetaDescription);
+    if (nextSeoTitle !== undefined || nextSeoDesc !== undefined) {
+      const seoMap = getStoredSeoMetadataMap();
+      seoMap[resolvedId] = {
+        seoTitle: nextSeoTitle,
+        seoMetaDescription: nextSeoDesc,
+      };
+      if (targetProd?.slug) {
+        seoMap[targetProd.slug] = {
+          seoTitle: nextSeoTitle,
+          seoMetaDescription: nextSeoDesc,
+        };
+      }
+      saveStoredSeoMetadataMap(seoMap);
+    }
+
     const finalStoredLinks = getStoredVariantLinksMap();
 
     setProducts(prev => prev.map(p => {
@@ -2140,6 +2226,10 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const updated: Product = {
           ...p,
           ...updatedFields,
+          seoTitle: nextSeoTitle,
+          seo_title: nextSeoTitle,
+          seoMetaDescription: nextSeoDesc,
+          seo_meta_description: nextSeoDesc,
           variantGroup: updatedFields.variantGroup !== undefined ? updatedFields.variantGroup : (targetLink?.variantGroup ?? p.variantGroup),
           linkedVariantIds: updatedFields.linkedVariantIds !== undefined ? updatedFields.linkedVariantIds : (targetLink?.linkedVariantIds ?? p.linkedVariantIds),
           price: nextPrice,

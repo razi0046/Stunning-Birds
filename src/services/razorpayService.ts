@@ -251,7 +251,7 @@ export async function createRazorpayOrder(
         key: String(keyId || ''),
         receipt: rawData.receipt || rawData.data?.receipt || receipt,
         status: rawData.status || rawData.data?.status || 'created',
-        isTestMode: rawData.isTestMode ?? rawData.data?.isTestMode ?? true,
+        isTestMode: rawData.isTestMode ?? rawData.data?.isTestMode ?? false,
         notes: rawData.notes || rawData.data?.notes || notes,
       };
 
@@ -467,9 +467,14 @@ export async function launchRazorpayCheckout(options: OpenRazorpayOptions): Prom
       handler: async (response: RazorpayPaymentSuccessResult) => {
         console.log('Razorpay payment response received from client modal:', response);
         try {
+          // Security Check: Verify that modal response order ID matches the authoritative server-created order ID
+          if (response.razorpay_order_id && response.razorpay_order_id !== finalOrderId) {
+            throw new Error('Payment security error: Razorpay order ID mismatch between checkout session and modal response.');
+          }
+
           // Cryptographic signature verification on server
           const verificationResult = await verifyRazorpayPayment({
-            razorpay_order_id: response.razorpay_order_id || finalOrderId,
+            razorpay_order_id: finalOrderId,
             razorpay_payment_id: response.razorpay_payment_id,
             razorpay_signature: response.razorpay_signature,
             order_id: orderNumber,
@@ -479,7 +484,7 @@ export async function launchRazorpayCheckout(options: OpenRazorpayOptions): Prom
             console.log('Payment verified successfully on server');
             onSuccess({
               razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_order_id: response.razorpay_order_id || finalOrderId,
+              razorpay_order_id: finalOrderId,
               razorpay_signature: response.razorpay_signature,
             });
           } else {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Truck, 
@@ -20,7 +20,7 @@ import { formatINR } from '../utils/formatCurrency';
 import { DEFAULT_PRODUCT_REVIEWS } from '../data/mockData';
 import { ProductReview } from '../types';
 import { RelatedProductsSection } from './RelatedProductsSection';
-import { applyProductSEO, resetDefaultSEO, getProductCanonicalUrl } from '../utils/seoHelper';
+import { applyProductSEO, resetDefaultSEO, getProductCanonicalUrl, getEffectiveProductSEO } from '../utils/seoHelper';
 
 export const ProductDetailScreen: React.FC = () => {
   const { 
@@ -40,10 +40,113 @@ export const ProductDetailScreen: React.FC = () => {
   const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [openAccordion, setOpenAccordion] = useState<string | null>('materials');
 
-  // Reset active image index when selected product changes (e.g. colour variant switch)
+  const mobileGalleryRef = useRef<HTMLDivElement>(null);
+  const thumbnailContainerRef = useRef<HTMLDivElement>(null);
+  const isProgrammaticScrollRef = useRef(false);
+  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Helper to scroll thumbnail container horizontally so the active thumbnail stays in view
+  const scrollThumbnailIntoView = useCallback((index: number) => {
+    if (thumbnailContainerRef.current) {
+      const container = thumbnailContainerRef.current;
+      const targetThumb = container.children[index] as HTMLElement;
+      if (targetThumb) {
+        const thumbLeft = targetThumb.offsetLeft;
+        const thumbWidth = targetThumb.offsetWidth;
+        const containerWidth = container.offsetWidth;
+        container.scrollTo({
+          left: thumbLeft - (containerWidth / 2) + (thumbWidth / 2),
+          behavior: 'smooth',
+        });
+      }
+    }
+  }, []);
+
+  // Programmatically scroll the mobile gallery and update active index
+  const scrollToImage = useCallback((index: number) => {
+    if (!selectedProduct || !selectedProduct.images || selectedProduct.images.length === 0) return;
+    const safeIndex = Math.max(0, Math.min(index, selectedProduct.images.length - 1));
+    setActiveImageIndex(safeIndex);
+    scrollThumbnailIntoView(safeIndex);
+
+    if (mobileGalleryRef.current) {
+      const container = mobileGalleryRef.current;
+      const targetChild = container.children[safeIndex] as HTMLElement;
+      if (targetChild) {
+        isProgrammaticScrollRef.current = true;
+        container.scrollTo({
+          left: targetChild.offsetLeft,
+          behavior: 'smooth',
+        });
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current);
+        }
+        scrollTimeoutRef.current = setTimeout(() => {
+          isProgrammaticScrollRef.current = false;
+        }, 500);
+      }
+    }
+  }, [selectedProduct, scrollThumbnailIntoView]);
+
+  // Sync state when user swipes mobile gallery container
+  const handleMobileScroll = useCallback(() => {
+    if (isProgrammaticScrollRef.current) return;
+    if (!mobileGalleryRef.current || !selectedProduct?.images?.length) return;
+
+    const container = mobileGalleryRef.current;
+    const scrollLeft = container.scrollLeft;
+    const width = container.clientWidth;
+    if (width <= 0) return;
+
+    const newIndex = Math.round(scrollLeft / width);
+    const boundedIndex = Math.max(0, Math.min(newIndex, selectedProduct.images.length - 1));
+
+    if (boundedIndex !== activeImageIndex) {
+      setActiveImageIndex(boundedIndex);
+      scrollThumbnailIntoView(boundedIndex);
+    }
+  }, [activeImageIndex, selectedProduct?.images?.length, scrollThumbnailIntoView]);
+
+  const handleTouchStart = useCallback(() => {
+    isProgrammaticScrollRef.current = false;
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+    }
+  }, []);
+
+  // Reset active image index and scroll positions when selected product changes (e.g. colour variant switch)
   useEffect(() => {
     setActiveImageIndex(0);
+    if (mobileGalleryRef.current) {
+      mobileGalleryRef.current.scrollTo({ left: 0, behavior: 'instant' as ScrollBehavior });
+    }
+    if (thumbnailContainerRef.current) {
+      thumbnailContainerRef.current.scrollTo({ left: 0, behavior: 'instant' as ScrollBehavior });
+    }
   }, [selectedProduct?.id]);
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  // Keep mobile scroll position aligned on window resize / orientation change
+  useEffect(() => {
+    const handleResize = () => {
+      if (mobileGalleryRef.current && mobileGalleryRef.current.children[activeImageIndex]) {
+        const targetChild = mobileGalleryRef.current.children[activeImageIndex] as HTMLElement;
+        if (targetChild) {
+          mobileGalleryRef.current.scrollTo({ left: targetChild.offsetLeft, behavior: 'instant' as ScrollBehavior });
+        }
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [activeImageIndex]);
 
   // Color variants associated with this product
   const colourVariants = React.useMemo(() => {
@@ -62,6 +165,11 @@ export const ProductDetailScreen: React.FC = () => {
     return () => {
       resetDefaultSEO();
     };
+  }, [selectedProduct]);
+
+  // Compute dynamic SEO values for display on the page
+  const effectiveSeo = React.useMemo(() => {
+    return selectedProduct ? getEffectiveProductSEO(selectedProduct) : null;
   }, [selectedProduct]);
 
   // Review Form State
@@ -206,44 +314,86 @@ export const ProductDetailScreen: React.FC = () => {
           className="lg:col-span-7 space-y-6"
         >
           
-          {/* Main Large Image (Swipeable on Mobile & Tablet, Static Carousel on Desktop) */}
-          <div className="relative w-full bg-[#f4eee5] overflow-hidden rounded-xs border border-[#e4d9cb] shadow-sm group">
+          {/* Main Large Image (Swipeable on Mobile & Tablet, Smooth Carousel on Desktop) */}
+          <div 
+            id="product-detail-image-gallery-container"
+            className="relative w-full bg-[#f4eee5] overflow-hidden rounded-xs border border-[#e4d9cb] shadow-sm group"
+          >
             
             {/* Mobile & Tablet: Native Horizontal Swipeable Scroll Container */}
-            <div className="flex lg:hidden overflow-x-auto snap-x snap-mandatory scrollbar-none scroll-smooth">
+            <div 
+              ref={mobileGalleryRef}
+              onScroll={handleMobileScroll}
+              onTouchStart={handleTouchStart}
+              className="flex lg:hidden overflow-x-auto snap-x snap-mandatory scrollbar-none scroll-smooth"
+            >
               {selectedProduct.images.map((img, idx) => (
                 <div 
                   key={idx} 
-                  className="w-full shrink-0 aspect-3/4 sm:aspect-4/5 snap-center relative"
+                  className="w-full shrink-0 aspect-3/4 sm:aspect-4/5 snap-center relative flex items-center justify-center"
                 >
                   <img
                     src={img}
                     alt={`${selectedProduct.name} - Handcrafted ${selectedProduct.material || 'leather'} in ${selectedProduct.colorName} - View ${idx + 1}`}
                     referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover object-center"
+                    className="w-full h-full object-contain object-center select-none"
+                    style={{ objectFit: 'contain', width: '100%', height: '100%' }}
+                    draggable={false}
                   />
-                  {selectedProduct.images.length > 1 && (
-                    <div className="absolute top-3 right-3 px-2.5 py-1 bg-black/60 backdrop-blur-md rounded-full text-white text-[10px] font-mono tracking-wider font-semibold">
-                      {idx + 1} / {selectedProduct.images.length}
-                    </div>
-                  )}
                 </div>
               ))}
             </div>
 
+            {/* Mobile & Tablet: Angle Indicator Badge */}
+            {selectedProduct.images.length > 1 && (
+              <div className="lg:hidden absolute top-3 right-3 px-2.5 py-1 bg-black/60 backdrop-blur-md rounded-full text-white text-[10px] font-mono tracking-wider font-semibold pointer-events-none z-10">
+                {activeImageIndex + 1} / {selectedProduct.images.length}
+              </div>
+            )}
+
+            {/* Mobile & Tablet: Tap Navigation Controls */}
+            {selectedProduct.images.length > 1 && (
+              <div className="flex lg:hidden pointer-events-none absolute inset-0 items-center justify-between px-2.5 z-10">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    scrollToImage(activeImageIndex === 0 ? selectedProduct.images.length - 1 : activeImageIndex - 1);
+                  }}
+                  className="pointer-events-auto w-8 h-8 rounded-full bg-black/40 hover:bg-black/70 active:scale-95 text-white flex items-center justify-center backdrop-blur-xs transition-all cursor-pointer shadow-md"
+                  aria-label="Previous image"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    scrollToImage(activeImageIndex === selectedProduct.images.length - 1 ? 0 : activeImageIndex + 1);
+                  }}
+                  className="pointer-events-auto w-8 h-8 rounded-full bg-black/40 hover:bg-black/70 active:scale-95 text-white flex items-center justify-center backdrop-blur-xs transition-all cursor-pointer shadow-md"
+                  aria-label="Next image"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
             {/* Desktop (lg+): Full Animated Presentation */}
-            <div className="hidden lg:block relative aspect-3/4 lg:aspect-4/5 w-full">
+            <div className="hidden lg:flex items-center justify-center relative aspect-3/4 lg:aspect-4/5 w-full">
               <AnimatePresence mode="wait">
                 <motion.img
                   key={activeImageIndex}
                   src={selectedProduct.images[activeImageIndex] || selectedProduct.images[0]}
                   alt={`${selectedProduct.name} - Luxury Handcrafted ${selectedProduct.category} in ${selectedProduct.colorName}`}
                   referrerPolicy="no-referrer"
-                  initial={{ opacity: 0.4, scale: 1.02 }}
-                  animate={{ opacity: 1, scale: 1 }}
+                  initial={{ opacity: 0.4 }}
+                  animate={{ opacity: 1 }}
                   exit={{ opacity: 0.4 }}
-                  transition={{ duration: 0.4, ease: 'easeOut' }}
-                  className="w-full h-full object-cover object-center"
+                  transition={{ duration: 0.25, ease: 'easeOut' }}
+                  className="w-full h-full object-contain object-center select-none"
+                  style={{ objectFit: 'contain', width: '100%', height: '100%' }}
+                  draggable={false}
                 />
               </AnimatePresence>
 
@@ -254,7 +404,7 @@ export const ProductDetailScreen: React.FC = () => {
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveImageIndex((prev) => (prev === 0 ? selectedProduct.images.length - 1 : prev - 1));
+                      scrollToImage(activeImageIndex === 0 ? selectedProduct.images.length - 1 : activeImageIndex - 1);
                     }}
                     className="absolute left-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/40 hover:bg-black/70 text-white flex items-center justify-center backdrop-blur-xs transition-all opacity-0 group-hover:opacity-100 cursor-pointer shadow-md"
                     aria-label="Previous image"
@@ -265,7 +415,7 @@ export const ProductDetailScreen: React.FC = () => {
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setActiveImageIndex((prev) => (prev === selectedProduct.images.length - 1 ? 0 : prev + 1));
+                      scrollToImage(activeImageIndex === selectedProduct.images.length - 1 ? 0 : activeImageIndex + 1);
                     }}
                     className="absolute right-3 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/40 hover:bg-black/70 text-white flex items-center justify-center backdrop-blur-xs transition-all opacity-0 group-hover:opacity-100 cursor-pointer shadow-md"
                     aria-label="Next image"
@@ -284,14 +434,17 @@ export const ProductDetailScreen: React.FC = () => {
 
           {/* Multi-Angle Gallery Thumbnails (Scrollable on Mobile & Tablet, Grid on Desktop) */}
           {selectedProduct.images.length > 1 && (
-            <div className="flex lg:grid overflow-x-auto lg:overflow-visible pb-1 lg:pb-0 gap-3 sm:gap-4 snap-x snap-mandatory scrollbar-none lg:grid-cols-4">
+            <div 
+              ref={thumbnailContainerRef}
+              className="flex lg:grid overflow-x-auto lg:overflow-visible pb-1 lg:pb-0 gap-3 sm:gap-4 snap-x snap-mandatory scrollbar-none lg:grid-cols-4"
+            >
               {selectedProduct.images.map((img, idx) => (
                 <motion.button
                   key={idx}
-                  whileHover={{ scale: 1.03 }}
+                  whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.97 }}
-                  onClick={() => setActiveImageIndex(idx)}
-                  className={`relative shrink-0 w-24 sm:w-28 lg:w-full aspect-4/3 rounded-xs overflow-hidden border transition-all cursor-pointer snap-start ${
+                  onClick={() => scrollToImage(idx)}
+                  className={`relative shrink-0 w-24 sm:w-28 lg:w-full aspect-4/3 rounded-xs overflow-hidden border transition-all cursor-pointer snap-start bg-[#f4eee5] flex items-center justify-center ${
                     activeImageIndex === idx
                       ? 'border-[#8c562e] ring-2 ring-[#8c562e]/40 shadow-sm opacity-100'
                       : 'border-[#e4d9cb] hover:border-[#8c857d] opacity-80 hover:opacity-100'
@@ -301,9 +454,10 @@ export const ProductDetailScreen: React.FC = () => {
                     src={img}
                     alt={`${selectedProduct.name} angle ${idx + 1} - ${selectedProduct.colorName}`}
                     referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-contain object-center"
+                    draggable={false}
                   />
-                  <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-[#181614]/80 text-[#f5f1eb] text-[9px] font-semibold tracking-wide rounded-xs">
+                  <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-[#181614]/80 text-[#f5f1eb] text-[9px] font-semibold tracking-wide rounded-xs pointer-events-none">
                     {idx === 0 ? 'Hero' : `Angle ${idx + 1}`}
                   </div>
                 </motion.button>
@@ -722,6 +876,60 @@ export const ProductDetailScreen: React.FC = () => {
                 )}
               </AnimatePresence>
             </div>
+
+            {/* Accordion 4: SEO & Discovery Metadata */}
+            {effectiveSeo && (
+              <div id="product-seo-details-accordion" className="border-b border-[#ece4d8] pb-4">
+                <button
+                  id="seo-metadata-toggle-btn"
+                  onClick={() => toggleSection('seo')}
+                  className="w-full flex items-center justify-between text-xs font-semibold uppercase tracking-widest text-[#181614] hover:text-[#8c562e] transition-colors py-2 text-left cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <span>SEO Title & Meta Description</span>
+                    {effectiveSeo.isCustomTitle || effectiveSeo.isCustomDescription ? (
+                      <span className="px-1.5 py-0.5 text-[9px] font-mono tracking-wider uppercase bg-[#f6f2ea] text-[#8c562e] border border-[#e8dfd2] rounded-2xs font-semibold">
+                        Custom SEO
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 text-[9px] font-mono tracking-wider uppercase bg-[#faf8f5] text-[#8c857d] border border-[#ece4d8] rounded-2xs">
+                        Auto Generated
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-base font-light">{openAccordion === 'seo' ? '−' : '+'}</span>
+                </button>
+                <AnimatePresence>
+                  {openAccordion === 'seo' && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="text-xs text-[#6e665e] leading-relaxed pt-2 pb-1 space-y-3 overflow-hidden"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-[#181614] text-[11px] uppercase tracking-wider">SEO Title</span>
+                          <span className="text-[10px] text-[#8c857d] font-mono">{effectiveSeo.seoTitle.length} chars</span>
+                        </div>
+                        <p id="product-page-seo-title-display" className="text-xs text-[#2c2621] font-medium bg-[#faf7f2] p-2.5 rounded-xs border border-[#ece4d8] break-words">
+                          {effectiveSeo.seoTitle}
+                        </p>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-[#181614] text-[11px] uppercase tracking-wider">SEO Meta Description</span>
+                          <span className="text-[10px] text-[#8c857d] font-mono">{effectiveSeo.seoMetaDescription.length} chars</span>
+                        </div>
+                        <p id="product-page-seo-desc-display" className="text-xs text-[#5c544d] bg-[#faf7f2] p-2.5 rounded-xs border border-[#ece4d8] leading-relaxed break-words">
+                          {effectiveSeo.seoMetaDescription}
+                        </p>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )}
 
           </div>
 

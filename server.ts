@@ -192,6 +192,10 @@ const mapSupabaseProduct = (p: any): Product => {
     productHighlights: Array.isArray(p.product_highlights) ? p.product_highlights : [],
     featured: Boolean(p.featured),
     isNewArrival: Boolean(p.is_new_arrival),
+    seoTitle: p.seo_title || p.seoTitle || undefined,
+    seo_title: p.seo_title || p.seoTitle || undefined,
+    seoMetaDescription: p.seo_description || p.seo_meta_description || p.seoMetaDescription || undefined,
+    seo_meta_description: p.seo_description || p.seo_meta_description || p.seoMetaDescription || undefined,
     reviews: Array.isArray(p.product_reviews) ? p.product_reviews.map((r: any) => ({
       id: r.id,
       authorName: r.author_name,
@@ -858,6 +862,10 @@ async function startServer() {
       shippingInfo: data.shippingInfo || 'Complimentary express courier across India.',
       monogramAvailable: data.monogramAvailable ?? true,
       productHighlights: (Array.isArray(data.productHighlights) ? data.productHighlights : []) as any,
+      seoTitle: data.seoTitle || data.seo_title || undefined,
+      seo_title: data.seoTitle || data.seo_title || undefined,
+      seoMetaDescription: data.seoMetaDescription || data.seo_meta_description || data.seoDescription || data.seo_description || undefined,
+      seo_meta_description: data.seoMetaDescription || data.seo_meta_description || data.seoDescription || data.seo_description || undefined,
     };
 
     try {
@@ -884,6 +892,8 @@ async function startServer() {
         shipping_info: newProduct.shippingInfo,
         monogram_available: newProduct.monogramAvailable,
         product_highlights: newProduct.productHighlights,
+        seo_title: newProduct.seoTitle,
+        seo_description: newProduct.seoMetaDescription,
       });
     } catch (e) {
       console.warn('Supabase product insert notice:', e);
@@ -929,6 +939,12 @@ async function startServer() {
       if (data.images !== undefined) supabasePayload.images = data.images;
       if (data.description !== undefined) supabasePayload.description = data.description;
       if (data.productHighlights !== undefined) supabasePayload.product_highlights = data.productHighlights;
+      if (data.seoTitle !== undefined || data.seo_title !== undefined) {
+        supabasePayload.seo_title = data.seoTitle || data.seo_title || null;
+      }
+      if (data.seoMetaDescription !== undefined || data.seo_meta_description !== undefined || data.seoDescription !== undefined || data.seo_description !== undefined) {
+        supabasePayload.seo_description = data.seoMetaDescription || data.seo_meta_description || data.seoDescription || data.seo_description || null;
+      }
 
       await supabase.from('products').update(supabasePayload).or(`id.eq.${id},slug.eq.${id}`);
     } catch (e) {
@@ -938,6 +954,8 @@ async function startServer() {
     if (index >= 0) {
       const nextPrice = resolvedPrice !== undefined ? resolvedPrice : products[index].price;
       const nextMrp = resolvedMrp !== undefined ? (resolvedMrp === null ? undefined : resolvedMrp) : products[index].originalPrice;
+      const updatedSeoTitle = data.seoTitle !== undefined ? data.seoTitle : (data.seo_title !== undefined ? data.seo_title : products[index].seoTitle);
+      const updatedSeoDesc = data.seoMetaDescription !== undefined ? data.seoMetaDescription : (data.seo_meta_description !== undefined ? data.seo_meta_description : (data.seoDescription !== undefined ? data.seoDescription : products[index].seoMetaDescription));
       products[index] = {
         ...products[index],
         ...data,
@@ -949,6 +967,10 @@ async function startServer() {
         originalPrice: nextMrp,
         mrp: nextMrp,
         original_price: nextMrp,
+        seoTitle: updatedSeoTitle,
+        seo_title: updatedSeoTitle,
+        seoMetaDescription: updatedSeoDesc,
+        seo_meta_description: updatedSeoDesc,
         badge: (data.badge !== undefined ? data.badge : products[index].badge) as any,
         category: (data.category !== undefined ? data.category : products[index].category) as any,
         productHighlights: (data.productHighlights !== undefined ? data.productHighlights : products[index].productHighlights) as any,
@@ -1514,6 +1536,34 @@ async function startServer() {
     });
   });
 
+  // Server-Side Razorpay Live Order & Payment Tracking Registry
+  interface ServerTrackedPaymentOrder {
+    orderId: string;
+    amountPaise: number;
+    finalPayableAmount: number;
+    currency: string;
+    receipt: string;
+    customerEmail?: string;
+    createdAt: number;
+    isVerified: boolean;
+    verifiedPaymentId?: string;
+    verifiedAt?: number;
+  }
+
+  const serverTrackedOrders = new Map<string, ServerTrackedPaymentOrder>();
+  const processedPaymentIds = new Set<string>();
+
+  // Housekeeping: Purge order records older than 24 hours to prevent memory buildup
+  setInterval(() => {
+    const now = Date.now();
+    const MAX_AGE = 24 * 60 * 60 * 1000;
+    for (const [id, record] of serverTrackedOrders.entries()) {
+      if (now - record.createdAt > MAX_AGE) {
+        serverTrackedOrders.delete(id);
+      }
+    }
+  }, 60 * 60 * 1000);
+
   // 13. Razorpay Order Creation Endpoint (Public / Customer)
   // Support GET & HEAD probes for route verification, health monitoring, and deployment checks
   app.get(['/api/payments/create-order', '/payments/create-order'], (req, res) => {
@@ -1525,7 +1575,7 @@ async function startServer() {
       method: 'POST',
       configured: Boolean(keyId),
       hasSecretConfigured: Boolean(keySecret),
-      isTestMode: keyId ? keyId.startsWith('rzp_test_') : true,
+      isTestMode: keyId ? keyId.startsWith('rzp_test_') : false,
       isLiveMode: keyId ? keyId.startsWith('rzp_live_') : false,
       message: 'Razorpay order creation endpoint is active. Send a POST request with order parameters.',
     });
@@ -1643,6 +1693,19 @@ async function startServer() {
       }
 
       const orderData = await response.json();
+
+      // Authoritative Server Tracking: Record this server-created order in registry
+      serverTrackedOrders.set(orderData.id, {
+        orderId: orderData.id,
+        amountPaise: orderData.amount,
+        finalPayableAmount: payableAmount,
+        currency: orderData.currency || 'INR',
+        receipt: orderData.receipt,
+        customerEmail: effectiveEmail || customer?.email || '',
+        createdAt: Date.now(),
+        isVerified: false,
+      });
+
       return res.json({
         success: true,
         orderId: orderData.id,
@@ -1704,7 +1767,7 @@ async function startServer() {
     res.status(204).end();
   });
 
-  app.post(['/api/payments/verify', '/payments/verify'], paymentLimiter, (req, res) => {
+  app.post(['/api/payments/verify', '/payments/verify'], paymentLimiter, async (req, res) => {
     try {
       const validation = RazorpayVerifySchema.safeParse(req.body);
       if (!validation.success) {
@@ -1718,6 +1781,7 @@ async function startServer() {
 
       const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = validation.data;
 
+      const keyId = cleanEnvKey(process.env.RAZORPAY_KEY_ID);
       const keySecret = cleanEnvKey(process.env.RAZORPAY_KEY_SECRET);
       if (!keySecret) {
         return res.status(500).json({
@@ -1727,6 +1791,49 @@ async function startServer() {
         });
       }
 
+      // 1. Replay Protection: Prevent reuse of an already processed payment ID
+      if (processedPaymentIds.has(razorpay_payment_id)) {
+        return res.status(400).json({
+          success: false,
+          verified: false,
+          error: 'Duplicate payment rejection: This Razorpay payment ID has already been verified and fulfilled.',
+        });
+      }
+
+      const duplicateInState = orders.some(
+        o => (o as any).razorpayPaymentId === razorpay_payment_id ||
+             o.shippingLabel?.razorpayPaymentId === razorpay_payment_id
+      );
+      if (duplicateInState) {
+        return res.status(400).json({
+          success: false,
+          verified: false,
+          error: 'This payment is already tied to an existing order in session state (replay rejected).',
+        });
+      }
+
+      const serviceSupabase = getServiceSupabase();
+      if (serviceSupabase) {
+        try {
+          const { data: existingDbOrders } = await serviceSupabase
+            .from('orders')
+            .select('id')
+            .or(`shipping_label->>razorpayPaymentId.eq.${razorpay_payment_id},razorpay_payment_id.eq.${razorpay_payment_id}`)
+            .limit(1);
+
+          if (existingDbOrders && existingDbOrders.length > 0) {
+            return res.status(400).json({
+              success: false,
+              verified: false,
+              error: 'This payment ID has already been recorded in database orders (replay rejected).',
+            });
+          }
+        } catch (dbCheckErr) {
+          console.warn('Database payment uniqueness check note:', dbCheckErr);
+        }
+      }
+
+      // 2. Cryptographic HMAC-SHA256 Signature Verification
       const generatedSignature = crypto
         .createHmac('sha256', keySecret)
         .update(`${razorpay_order_id}|${razorpay_payment_id}`)
@@ -1744,6 +1851,108 @@ async function startServer() {
         });
       }
 
+      // 3. Order Origin & Binding Verification: Do NOT trust arbitrary frontend-supplied order IDs
+      let tracked = serverTrackedOrders.get(razorpay_order_id);
+
+      if (tracked) {
+        if (tracked.isVerified) {
+          return res.status(400).json({
+            success: false,
+            verified: false,
+            error: 'This order has already been verified and fulfilled.',
+          });
+        }
+      } else if (keyId && keySecret) {
+        // Fallback: If not in memory (e.g. server restart), verify directly against Razorpay API
+        try {
+          const basicAuth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+          const rzpOrderRes = await fetch(
+            `https://api.razorpay.com/v1/orders/${encodeURIComponent(razorpay_order_id)}`,
+            { headers: { Authorization: `Basic ${basicAuth}` } }
+          );
+
+          if (!rzpOrderRes.ok) {
+            return res.status(400).json({
+              success: false,
+              verified: false,
+              error: 'Untrusted Razorpay order: Order does not exist on this merchant account.',
+            });
+          }
+
+          const rzpOrderData = await rzpOrderRes.json();
+          // Ensure the order belongs to our atelier
+          if (rzpOrderData.notes?.brand !== 'STUNNING BIRDS ATELIER') {
+            return res.status(400).json({
+              success: false,
+              verified: false,
+              error: 'Untrusted Razorpay order: Atelier brand origin verification failed.',
+            });
+          }
+
+          tracked = {
+            orderId: rzpOrderData.id,
+            amountPaise: rzpOrderData.amount,
+            finalPayableAmount: rzpOrderData.amount / 100,
+            currency: rzpOrderData.currency || 'INR',
+            receipt: rzpOrderData.receipt || '',
+            createdAt: Date.now(),
+            isVerified: false,
+          };
+          serverTrackedOrders.set(razorpay_order_id, tracked);
+        } catch (apiErr: any) {
+          console.warn('Razorpay order verification API lookup note:', apiErr);
+        }
+      }
+
+      // 4. Payment Entity Verification on Razorpay API (verifies payment belongs to order & is not failed)
+      if (keyId && keySecret) {
+        try {
+          const basicAuth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+          const rzpPayRes = await fetch(
+            `https://api.razorpay.com/v1/payments/${encodeURIComponent(razorpay_payment_id)}`,
+            { headers: { Authorization: `Basic ${basicAuth}` } }
+          );
+
+          if (rzpPayRes.ok) {
+            const rzpPayData = await rzpPayRes.json();
+            // Verify payment is bound to this order
+            if (rzpPayData.order_id && rzpPayData.order_id !== razorpay_order_id) {
+              return res.status(400).json({
+                success: false,
+                verified: false,
+                error: 'Security violation: Payment is not associated with this order ID.',
+              });
+            }
+            // Verify payment status
+            if (rzpPayData.status === 'failed') {
+              return res.status(400).json({
+                success: false,
+                verified: false,
+                error: 'Payment was marked as failed on Razorpay.',
+              });
+            }
+            // Verify amount if tracked
+            if (tracked && rzpPayData.amount < tracked.amountPaise) {
+              return res.status(400).json({
+                success: false,
+                verified: false,
+                error: 'Payment amount is less than the required order amount.',
+              });
+            }
+          }
+        } catch (payCheckErr) {
+          console.warn('Razorpay payment entity API verification lookup warning:', payCheckErr);
+        }
+      }
+
+      // 5. Mark payment and order as securely verified
+      if (tracked) {
+        tracked.isVerified = true;
+        tracked.verifiedPaymentId = razorpay_payment_id;
+        tracked.verifiedAt = Date.now();
+      }
+      processedPaymentIds.add(razorpay_payment_id);
+
       return res.json({
         success: true,
         verified: true,
@@ -1756,93 +1965,7 @@ async function startServer() {
     }
   });
 
-  // 15b. POST Razorpay Webhook (Server-to-Server Asynchronous Confirmation)
-  // Receives payment.captured, order.paid, and payment.failed events directly from Razorpay
-  app.post(['/api/payments/webhook', '/api/webhooks/razorpay'], async (req, res) => {
-    const signature = (req.headers['x-razorpay-signature'] as string) || '';
-    const webhookSecret = cleanEnvKey(process.env.RAZORPAY_WEBHOOK_SECRET);
-
-    if (webhookSecret) {
-      if (!signature) {
-        console.warn('⚠️ Webhook received without x-razorpay-signature header');
-        return res.status(400).json({ error: 'Missing x-razorpay-signature header' });
-      }
-
-      const rawBody = (req as any).rawBody ? (req as any).rawBody.toString('utf8') : JSON.stringify(req.body);
-      const expectedSignature = crypto
-        .createHmac('sha256', webhookSecret)
-        .update(rawBody)
-        .digest('hex');
-
-      const isMatch =
-        expectedSignature.length === signature.length &&
-        crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(signature));
-
-      if (!isMatch) {
-        console.error('❌ Invalid Razorpay webhook signature');
-        return res.status(400).json({ error: 'Invalid webhook signature' });
-      }
-    } else {
-      console.warn('⚠️ RAZORPAY_WEBHOOK_SECRET is not configured on server. Proceeding without signature verification.');
-    }
-
-    const event = req.body?.event;
-    const payload = req.body?.payload;
-
-    console.log(`🔔 Razorpay Webhook received: ${event}`, {
-      paymentId: payload?.payment?.entity?.id,
-      orderId: payload?.payment?.entity?.order_id,
-      amount: payload?.payment?.entity?.amount,
-      status: payload?.payment?.entity?.status,
-    });
-
-    try {
-      if (event === 'payment.captured' || event === 'order.paid') {
-        const paymentEntity = payload?.payment?.entity;
-        const razorpayOrderId = paymentEntity?.order_id;
-        const razorpayPaymentId = paymentEntity?.id;
-
-        if (razorpayOrderId) {
-          // Update in-memory orders
-          const existingOrder = orders.find(
-            o => o.razorpayOrderId === razorpayOrderId || o.id === paymentEntity?.notes?.order_id
-          );
-          if (existingOrder) {
-            existingOrder.paymentStatus = 'Paid';
-            existingOrder.razorpayPaymentId = razorpayPaymentId;
-            existingOrder.fulfillmentStatus = 'PROCESSING';
-          }
-
-          // Update Supabase orders if configured
-          const serviceSupabase = getServiceSupabase();
-          if (serviceSupabase) {
-            await serviceSupabase
-              .from('orders')
-              .update({
-                payment_status: 'paid',
-                razorpay_payment_id: razorpayPaymentId,
-                fulfillment_status: 'processing',
-                updated_at: new Date().toISOString(),
-              })
-              .or(`razorpay_order_id.eq.${razorpayOrderId},id.eq.${paymentEntity?.notes?.order_id}`);
-          }
-        }
-      } else if (event === 'payment.failed') {
-        const paymentEntity = payload?.payment?.entity;
-        console.warn('Razorpay payment failed event received:', {
-          paymentId: paymentEntity?.id,
-          orderId: paymentEntity?.order_id,
-          errorDescription: paymentEntity?.error_description,
-        });
-      }
-
-      // Always return HTTP 200 OK so Razorpay acknowledges receipt
-      res.status(200).json({ status: 'ok', received: true });
-    } catch (err: any) {
-      console.error('Error processing Razorpay webhook:', err);
-      res.status(500).json({ error: 'Failed to process webhook event' });
-    }
-  });
+  // 15b. Payment verification note: Online orders are verified client-to-server via cryptographically authenticated HMAC-SHA256 signature verification (/api/payments/verify). Webhooks are not used.
 
   // 16. GET Shipping Label for an Order (PROTECTED: Admin or Order Owner ONLY)
   app.get('/api/orders/:id/shipping-label', requireAuth, async (req, res) => {

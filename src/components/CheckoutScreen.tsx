@@ -20,12 +20,11 @@ export const CheckoutScreen: React.FC = () => {
   } = useShop();
 
   const [contactEmail, setContactEmail] = useState(userProfile.email || '');
-  const [phoneNumber, setPhoneNumber] = useState(userProfile.phone || '');
-  const [pincode, setPincode] = useState(userProfile.addresses?.[0]?.pincode || '');
-  const [landmark, setLandmark] = useState('');
-  const [city, setCity] = useState(userProfile.addresses?.[0]?.city || '');
-  const [stateVal, setStateVal] = useState(userProfile.addresses?.[0]?.state || '');
-  const [addressLine, setAddressLine] = useState(userProfile.addresses?.[0]?.addressLine || '');
+  const [phoneNumber, setPhoneNumber] = useState(userProfile.phone ? userProfile.phone.replace(/\D/g, '') : '');
+  const [pincode] = useState(userProfile.addresses?.[0]?.pincode || '700039');
+  const [completeAddress, setCompleteAddress] = useState('');
+  const [city, setCity] = useState('');
+  const [stateVal, setStateVal] = useState('');
   const [shippingMethod, setShippingMethod] = useState('Complimentary Express Courier (2-4 Days) · ₹0');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>('Razorpay');
   
@@ -132,13 +131,27 @@ export const CheckoutScreen: React.FC = () => {
       return;
     }
 
-    if (!phoneNumber.trim()) {
-      setPaymentError('Please provide a contact phone number for courier dispatch.');
+    const cleanPhone = phoneNumber.trim().replace(/\D/g, '');
+    if (!cleanPhone || cleanPhone.length < 10) {
+      setPaymentError('Please enter a valid numeric phone number (at least 10 digits).');
       return;
     }
 
-    if (!pincode.trim() || !city.trim() || !stateVal.trim()) {
-      setPaymentError('Please fill in complete shipping address details.');
+    const cleanAddress = completeAddress.trim();
+    if (!cleanAddress || cleanAddress.length < 5) {
+      setPaymentError('Please enter your complete delivery address.');
+      return;
+    }
+
+    const cleanCity = city.trim();
+    if (!cleanCity || !/^[a-zA-Z\s.'-]+$/.test(cleanCity) || cleanCity.length < 2) {
+      setPaymentError('Please enter a valid city name (letters only).');
+      return;
+    }
+
+    const cleanState = stateVal.trim();
+    if (!cleanState || !/^[a-zA-Z\s.'-]+$/.test(cleanState) || cleanState.length < 2) {
+      setPaymentError('Please enter a valid state name (letters only).');
       return;
     }
 
@@ -153,12 +166,12 @@ export const CheckoutScreen: React.FC = () => {
     };
 
     const shippingAddressDetails = {
-      phone: phoneNumber,
-      pincode,
-      landmark,
-      city,
-      state: stateVal,
-      addressLine: addressLine || `${city}, ${stateVal}`,
+      phone: cleanPhone,
+      pincode: pincode || userProfile.addresses?.[0]?.pincode || '700039',
+      landmark: '',
+      city: cleanCity,
+      state: cleanState,
+      addressLine: cleanAddress,
     };
 
     // 1. Cash on Delivery Flow
@@ -198,11 +211,13 @@ export const CheckoutScreen: React.FC = () => {
         couponCode: appliedCoupon?.code,
         customerName: customerDetails.name,
         customerEmail: customerDetails.email,
-        customerPhone: phoneNumber,
+        customerPhone: cleanPhone,
         preferredMethod: paymentMethod,
         notes: {
-          shipping_city: city,
-          shipping_pincode: pincode,
+          shipping_address: cleanAddress,
+          shipping_city: cleanCity,
+          shipping_state: cleanState,
+          shipping_pincode: pincode || userProfile.addresses?.[0]?.pincode || '700039',
           items_count: String(cart.length),
           ...(appliedCoupon ? { coupon_code: appliedCoupon.code, discount_amount: String(discountAmount) } : {}),
         },
@@ -420,39 +435,43 @@ export const CheckoutScreen: React.FC = () => {
               Shipping Address
             </label>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <input
-                  id="checkout-phone"
-                  type="text"
-                  required
-                  value={phoneNumber}
-                  onChange={e => setPhoneNumber(e.target.value)}
-                  placeholder="Enter your phone number"
-                  className="w-full bg-white border border-[#ded5c7] px-4 py-3 text-sm text-[#181614] focus:outline-none focus:border-[#8c562e] rounded-xs shadow-2xs transition-colors"
-                />
-              </div>
-              <div>
-                <input
-                  id="checkout-zip"
-                  type="text"
-                  required
-                  value={pincode}
-                  onChange={e => setPincode(e.target.value)}
-                  placeholder="Pincode / ZIP (e.g. 700039) *"
-                  className="w-full bg-white border border-[#ded5c7] px-4 py-3 text-sm text-[#181614] focus:outline-none focus:border-[#8c562e] rounded-xs shadow-2xs transition-colors"
-                />
-              </div>
+            <div>
+              <input
+                id="checkout-phone"
+                type="tel"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                maxLength={15}
+                required
+                value={phoneNumber}
+                onChange={e => {
+                  const numericOnly = e.target.value.replace(/\D/g, '').slice(0, 15);
+                  setPhoneNumber(numericOnly);
+                }}
+                onKeyDown={e => {
+                  if (
+                    !/[0-9]/.test(e.key) &&
+                    !['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Tab', 'Enter'].includes(e.key) &&
+                    !e.ctrlKey &&
+                    !e.metaKey
+                  ) {
+                    e.preventDefault();
+                  }
+                }}
+                placeholder="Phone Number (Digits only, min 10 digits) *"
+                className="w-full bg-white border border-[#ded5c7] px-4 py-3 text-sm text-[#181614] focus:outline-none focus:border-[#8c562e] rounded-xs shadow-2xs transition-colors"
+              />
             </div>
 
             <div>
-              <input
-                id="checkout-landmark"
-                type="text"
-                value={landmark}
-                onChange={e => setLandmark(e.target.value)}
-                placeholder="Landmark (Optional)"
-                className="w-full bg-white border border-[#ded5c7] px-4 py-3 text-sm text-[#181614] focus:outline-none focus:border-[#8c562e] rounded-xs shadow-2xs transition-colors"
+              <textarea
+                id="checkout-complete-address"
+                required
+                rows={3}
+                value={completeAddress}
+                onChange={e => setCompleteAddress(e.target.value)}
+                placeholder="Complete Delivery Address (House/Flat No., Building, Street, Area) *"
+                className="w-full bg-white border border-[#ded5c7] px-4 py-3 text-sm text-[#181614] focus:outline-none focus:border-[#8c562e] rounded-xs shadow-2xs transition-colors resize-none"
               />
             </div>
 
@@ -464,7 +483,7 @@ export const CheckoutScreen: React.FC = () => {
                   required
                   value={city}
                   onChange={e => setCity(e.target.value)}
-                  placeholder="City (e.g. Kolkata) *"
+                  placeholder="City *"
                   className="w-full bg-white border border-[#ded5c7] px-4 py-3 text-sm text-[#181614] focus:outline-none focus:border-[#8c562e] rounded-xs shadow-2xs transition-colors"
                 />
               </div>
@@ -475,14 +494,10 @@ export const CheckoutScreen: React.FC = () => {
                   required
                   value={stateVal}
                   onChange={e => setStateVal(e.target.value)}
-                  placeholder="State (e.g. West Bengal) *"
+                  placeholder="State *"
                   className="w-full bg-white border border-[#ded5c7] px-4 py-3 text-sm text-[#181614] focus:outline-none focus:border-[#8c562e] rounded-xs shadow-2xs transition-colors"
                 />
               </div>
-            </div>
-
-            <div className="p-3 bg-[#f6f2ea] border border-[#e4d9cb] rounded-xs text-xs text-[#6e665e]">
-              <span className="font-medium text-[#181614]">Current:</span> {addressLine || '6E/1B Topsia 2nd lane'}, {city || 'Kolkata'}, {stateVal || 'West Bengal'} {pincode || '700039'}
             </div>
           </div>
 
@@ -508,11 +523,11 @@ export const CheckoutScreen: React.FC = () => {
                   Payment
                 </h3>
                 <p className="text-xs text-[#78716c]">
-                  Encrypted & verified with Razorpay Test Mode.
+                  Encrypted & verified via 256-bit SSL Razorpay Secure.
                 </p>
               </div>
               <span className="px-2.5 py-1 bg-[#f5ede4] text-[#8c562e] border border-[#e2d3c3] text-[10px] font-bold rounded-xs uppercase tracking-wider">
-                Razorpay Test Mode
+                Razorpay Secure
               </span>
             </div>
 
@@ -586,11 +601,6 @@ export const CheckoutScreen: React.FC = () => {
                   </div>
                   <Smartphone className="w-5 h-5 text-[#8c857d]" />
                 </label>
-                {paymentMethod === 'UPI' && (
-                  <div className="mt-3 ml-7 p-2.5 bg-[#f5ede4]/70 border border-[#e2d3c3] rounded-xs text-[11px] text-[#705642] flex items-center justify-between">
-                    <span>Test Mode: Scan QR or enter <code className="font-mono bg-white px-1.5 py-0.5 rounded border border-[#ded5c7] text-[#181614] font-bold">success@razorpay</code></span>
-                  </div>
-                )}
               </div>
 
               {/* Option 4: Cash on Delivery */}

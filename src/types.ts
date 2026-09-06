@@ -59,6 +59,10 @@ export interface Product {
   reviews?: ProductReview[];
   variantGroup?: string;
   linkedVariantIds?: string[];
+  seoTitle?: string;
+  seo_title?: string;
+  seoMetaDescription?: string;
+  seo_meta_description?: string;
 }
 
 export interface CartItem {

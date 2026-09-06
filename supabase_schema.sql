@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS public.products (
   featured BOOLEAN DEFAULT FALSE,
   is_new_arrival BOOLEAN DEFAULT FALSE,
   product_highlights JSONB DEFAULT '[]'::jsonb,
+  seo_title TEXT,
+  seo_description TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );

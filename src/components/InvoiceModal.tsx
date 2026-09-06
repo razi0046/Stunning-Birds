@@ -227,17 +227,22 @@ export const InvoiceModal: React.FC<Props> = ({
                     BILL TO / BUYER DETAILS
                   </div>
                   <div className="p-3 space-y-1 text-black flex-1">
-                    <div className="font-bold text-xs">{order.customer.name || 'Valued Patron'}</div>
-                    <div>{order.shippingAddress.addressLine}</div>
+                    <div className="font-bold text-xs">{order.customer?.name || 'Customer'}</div>
+                    {order.shippingAddress?.addressLine && <div>{order.shippingAddress.addressLine}</div>}
                     <div>
-                      {order.shippingAddress.city}, {order.shippingAddress.state} - {order.shippingAddress.pincode}
+                      {[order.shippingAddress?.city, order.shippingAddress?.state].filter(Boolean).join(', ')}
+                      {order.shippingAddress?.pincode ? ` - ${order.shippingAddress.pincode}` : ''}
                     </div>
-                    <div>
-                      Phone: <span className="font-mono font-semibold">{order.shippingAddress.phone || '+91 98840 12345'}</span>
-                    </div>
-                    <div>
-                      Email: <span className="text-gray-800">{order.customer.email || 'client@stunningbirds.com'}</span>
-                    </div>
+                    {order.shippingAddress?.phone && (
+                      <div>
+                        Phone: <span className="font-mono font-semibold">{order.shippingAddress.phone}</span>
+                      </div>
+                    )}
+                    {order.customer?.email && (
+                      <div>
+                        Email: <span className="text-gray-800">{order.customer.email}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -247,17 +252,20 @@ export const InvoiceModal: React.FC<Props> = ({
                     SHIP TO / DELIVERY DESTINATION
                   </div>
                   <div className="p-3 space-y-1 text-black flex-1">
-                    <div className="font-bold text-xs">{order.customer.name || 'Valued Patron'}</div>
-                    <div>{order.shippingAddress.addressLine}</div>
-                    {order.shippingAddress.landmark && (
+                    <div className="font-bold text-xs">{order.customer?.name || 'Customer'}</div>
+                    {order.shippingAddress?.addressLine && <div>{order.shippingAddress.addressLine}</div>}
+                    {order.shippingAddress?.landmark && (
                       <div className="text-gray-700">Near {order.shippingAddress.landmark}</div>
                     )}
                     <div>
-                      {order.shippingAddress.city}, {order.shippingAddress.state} - {order.shippingAddress.pincode}
+                      {[order.shippingAddress?.city, order.shippingAddress?.state].filter(Boolean).join(', ')}
+                      {order.shippingAddress?.pincode ? ` - ${order.shippingAddress.pincode}` : ''}
                     </div>
-                    <div>
-                      Phone: <span className="font-mono font-semibold">{order.shippingAddress.phone || '+91 98840 12345'}</span>
-                    </div>
+                    {order.shippingAddress?.phone && (
+                      <div>
+                        Phone: <span className="font-mono font-semibold">{order.shippingAddress.phone}</span>
+                      </div>
+                    )}
                     <div className="text-gray-700 text-[9.5px]">
                       Shipping Method: <span className="font-semibold text-black">{order.shippingMethod || 'Express Courier'}</span>
                     </div>

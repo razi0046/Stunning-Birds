@@ -112,31 +112,13 @@ serve(async (req: Request) => {
       );
     }
 
-    // 2. Test Architecture / Placeholder Mode:
-    // When credentials have not been configured yet, generate a simulated Razorpay Test Order
-    // allowing developers to test the frontend flow seamlessly.
-    const mockOrderId = `order_test_${Date.now().toString(36)}_${Math.floor(1000 + Math.random() * 9000)}`;
-
+    // When live credentials are not configured, reject order creation
     return new Response(
       JSON.stringify({
-        success: true,
-        orderId: mockOrderId,
-        amount: amountInPaise,
-        currency: currency.toUpperCase(),
-        keyId: RAZORPAY_KEY_ID || 'rzp_test_PLACEHOLDER_KEY_ID',
-        receipt: orderReceipt,
-        status: 'created',
-        isTestMode: true,
-        isSimulated: true,
-        notes: {
-          brand: 'STUNNING BIRDS ATELIER',
-          customer_name: customer?.name || 'Valued Patron',
-          customer_email: customer?.email || '',
-          ...notes,
-        },
-        message: 'Razorpay Test Mode architecture active. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to enable live/sandbox API.',
+        success: false,
+        error: 'Razorpay gateway configuration error: RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET is not configured on the server.',
       }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (err: any) {
     console.error('Unexpected error in create-razorpay-order:', err);

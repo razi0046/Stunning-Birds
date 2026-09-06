@@ -183,6 +183,12 @@ export const ProductInputSchema = z.object({
   shippingInfo: safeString(2000).optional().default('Complimentary express courier across India.'),
   monogramAvailable: z.boolean().optional().default(true),
   productHighlights: z.array(safeString(500)).optional().default([]),
+  seoTitle: safeString(250).optional().nullable(),
+  seo_title: safeString(250).optional().nullable(),
+  seoMetaDescription: safeString(1000).optional().nullable(),
+  seo_meta_description: safeString(1000).optional().nullable(),
+  seoDescription: safeString(1000).optional().nullable(),
+  seo_description: safeString(1000).optional().nullable(),
 });
 
 export const ProductPatchSchema = z.object({
@@ -209,6 +215,12 @@ export const ProductPatchSchema = z.object({
   shippingInfo: safeString(2000).optional(),
   monogramAvailable: z.boolean().optional(),
   productHighlights: z.array(safeString(500)).optional(),
+  seoTitle: safeString(250).optional().nullable(),
+  seo_title: safeString(250).optional().nullable(),
+  seoMetaDescription: safeString(1000).optional().nullable(),
+  seo_meta_description: safeString(1000).optional().nullable(),
+  seoDescription: safeString(1000).optional().nullable(),
+  seo_description: safeString(1000).optional().nullable(),
 });
 
 /**

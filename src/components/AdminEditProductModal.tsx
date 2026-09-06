@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Save, Sparkles, Trash2, Plus, RefreshCw, Palette, Link2, Unlink } from 'lucide-react';
+import { X, Save, Sparkles, Trash2, Plus, RefreshCw, Palette, Link2, Unlink, Globe } from 'lucide-react';
 import { useShop } from '../context/ShopContext';
 import { Product, ProductCategory, ProductHighlight } from '../types';
 import { ImageGalleryUploader } from './ImageGalleryUploader';
@@ -24,6 +24,8 @@ export const AdminEditProductModal: React.FC<Props> = ({ product, onClose }) => 
   const [colorHex, setColorHex] = useState(product.colorHex || '#3a2012');
   const [material, setMaterial] = useState(product.material);
   const [description, setDescription] = useState(product.description);
+  const [seoTitle, setSeoTitle] = useState(product.seoTitle || product.seo_title || '');
+  const [seoMetaDescription, setSeoMetaDescription] = useState(product.seoMetaDescription || product.seo_meta_description || '');
   const [images, setImages] = useState<string[]>(product.images && product.images.length > 0 ? product.images : [
     'https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=1200&q=85'
   ]);
@@ -127,6 +129,10 @@ export const AdminEditProductModal: React.FC<Props> = ({ product, onClose }) => 
         colorHex,
         material: material.trim(),
         description: description.trim(),
+        seoTitle: seoTitle.trim() || undefined,
+        seo_title: seoTitle.trim() || undefined,
+        seoMetaDescription: seoMetaDescription.trim() || undefined,
+        seo_meta_description: seoMetaDescription.trim() || undefined,
         images: images.length > 0 ? images : product.images,
         badge: badge ? (badge as any) : undefined,
         inStock,
@@ -510,6 +516,57 @@ export const AdminEditProductModal: React.FC<Props> = ({ product, onClose }) => 
               onChange={e => setDescription(e.target.value)}
               className="w-full bg-white border border-[#ded5c7] px-3.5 py-2.5 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
             />
+          </div>
+
+          {/* SEARCH ENGINE OPTIMIZATION (SEO) */}
+          <div className="p-4 bg-[#fcfbf9] border border-[#e8dfd2] rounded-xs space-y-3">
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-[#181614] flex items-center gap-1.5">
+                <Globe className="w-3.5 h-3.5 text-[#8c562e]" />
+                <span>Search Engine Optimization (SEO)</span>
+              </h4>
+              <p className="text-[11px] text-[#78716c] mt-0.5">
+                Define custom meta tags for search engines, social shares, and browser tab titles.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-[#181614]">
+                    SEO Title
+                  </label>
+                  <span className={`text-[10px] ${seoTitle.length > 60 ? 'text-[#b45309] font-medium' : 'text-[#8c857d]'}`}>
+                    {seoTitle.length}/60 chars (Recommended: 50–60)
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  value={seoTitle}
+                  onChange={e => setSeoTitle(e.target.value)}
+                  placeholder="e.g. Heritage Bifold Wallet — Luxury Italian Leather | STUNNING BIRDS"
+                  className="w-full bg-white border border-[#ded5c7] px-3.5 py-2.5 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-[#181614]">
+                    SEO Meta Description
+                  </label>
+                  <span className={`text-[10px] ${seoMetaDescription.length > 160 ? 'text-[#b45309] font-medium' : 'text-[#8c857d]'}`}>
+                    {seoMetaDescription.length}/160 chars (Recommended: 120–160)
+                  </span>
+                </div>
+                <textarea
+                  rows={2}
+                  value={seoMetaDescription}
+                  onChange={e => setSeoMetaDescription(e.target.value)}
+                  placeholder="e.g. Discover our handcrafted Tuscan leather bifold wallet. Heirloom craftsmanship, personalized monogramming, and express nationwide delivery."
+                  className="w-full bg-white border border-[#ded5c7] px-3.5 py-2.5 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
+                />
+              </div>
+            </div>
           </div>
 
           {/* DYNAMIC PRODUCT HIGHLIGHTS SECTION */}

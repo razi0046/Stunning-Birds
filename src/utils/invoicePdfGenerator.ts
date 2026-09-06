@@ -395,14 +395,20 @@ export async function generateAndDownloadInvoicePDF(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
   doc.setTextColor(charcoal[0], charcoal[1], charcoal[2]);
-  doc.text(order.shippingAddress?.addressLine || 'Artisan Residence', margin + 3, currentY + 17);
-  doc.text(
-    `${order.shippingAddress?.city || 'City'}, ${order.shippingAddress?.state || 'State'} - ${order.shippingAddress?.pincode || '000000'}`,
-    margin + 3,
-    currentY + 21.5
-  );
-  doc.text(`Phone: ${order.shippingAddress?.phone || '+91 98840 12345'}`, margin + 3, currentY + 26);
-  doc.text(`Email: ${order.customer?.email || 'client@stunningbirds.com'}`, margin + 3, currentY + 30.5);
+  if (order.shippingAddress?.addressLine) {
+    doc.text(order.shippingAddress.addressLine, margin + 3, currentY + 17);
+  }
+  const buyerLocation = [order.shippingAddress?.city, order.shippingAddress?.state].filter(Boolean).join(', ') + 
+    (order.shippingAddress?.pincode ? ` - ${order.shippingAddress.pincode}` : '');
+  if (buyerLocation) {
+    doc.text(buyerLocation, margin + 3, currentY + 21.5);
+  }
+  if (order.shippingAddress?.phone) {
+    doc.text(`Phone: ${order.shippingAddress.phone}`, margin + 3, currentY + 26);
+  }
+  if (order.customer?.email) {
+    doc.text(`Email: ${order.customer.email}`, margin + 3, currentY + 30.5);
+  }
 
   // SHIP TO Box (Right)
   const rightBoxX = margin + halfW + 3;
@@ -428,23 +434,19 @@ export async function generateAndDownloadInvoicePDF(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
   doc.setTextColor(charcoal[0], charcoal[1], charcoal[2]);
-  doc.text(order.shippingAddress?.addressLine || 'Artisan Residence', rightBoxX + 3, currentY + 17);
-  if (order.shippingAddress?.landmark) {
-    doc.text(`Landmark: ${order.shippingAddress.landmark}`, rightBoxX + 3, currentY + 21.5);
-    doc.text(
-      `${order.shippingAddress?.city || 'City'}, ${order.shippingAddress?.state || 'State'} - ${order.shippingAddress?.pincode || '000000'}`,
-      rightBoxX + 3,
-      currentY + 26
-    );
-    doc.text(`Phone: ${order.shippingAddress?.phone || '+91 98840 12345'}`, rightBoxX + 3, currentY + 30.5);
-  } else {
-    doc.text(
-      `${order.shippingAddress?.city || 'City'}, ${order.shippingAddress?.state || 'State'} - ${order.shippingAddress?.pincode || '000000'}`,
-      rightBoxX + 3,
-      currentY + 21.5
-    );
-    doc.text(`Phone: ${order.shippingAddress?.phone || '+91 98840 12345'}`, rightBoxX + 3, currentY + 26);
-    doc.text(`Shipping Method: ${order.shippingMethod || 'Express Courier'}`, rightBoxX + 3, currentY + 30.5);
+  if (order.shippingAddress?.addressLine) {
+    doc.text(order.shippingAddress.addressLine, rightBoxX + 3, currentY + 17);
+  }
+  const destLocation = [order.shippingAddress?.city, order.shippingAddress?.state].filter(Boolean).join(', ') + 
+    (order.shippingAddress?.pincode ? ` - ${order.shippingAddress.pincode}` : '');
+  if (destLocation) {
+    doc.text(destLocation, rightBoxX + 3, currentY + 21.5);
+  }
+  if (order.shippingAddress?.phone) {
+    doc.text(`Phone: ${order.shippingAddress.phone}`, rightBoxX + 3, currentY + 26);
+  }
+  if (order.shippingMethod) {
+    doc.text(`Shipping Method: ${order.shippingMethod}`, rightBoxX + 3, currentY + 30.5);
   }
 
   currentY += addrHeight + 4;

@@ -110,4 +110,16 @@
   }
 }
 
+/* Product Detail Image Gallery Container */
+#product-detail-image-gallery-container {
+  position: relative;
+  width: 100%;
+}
+
+#product-detail-image-gallery-container img {
+  object-fit: contain !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
 

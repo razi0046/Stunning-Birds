@@ -90,8 +90,38 @@ const removeJsonLdScript = (id: string) => {
 };
 
 /**
+ * Computes the effective SEO Title and Meta Description for a product,
+ * returning either the bespoke saved values or the dynamically generated fallback.
+ */
+export const getEffectiveProductSEO = (product: Product): {
+  seoTitle: string;
+  seoMetaDescription: string;
+  isCustomTitle: boolean;
+  isCustomDescription: boolean;
+} => {
+  const customSeoTitle = (product.seoTitle || product.seo_title)?.trim();
+  const customSeoDescription = (product.seoMetaDescription || product.seo_meta_description)?.trim();
+
+  const rawDesc = (product.description || '').replace(/\s+/g, ' ').trim();
+  const materialInfo = product.material ? `Handcrafted in ${product.material}.` : 'Handcrafted full-grain leather.';
+  const colorInfo = product.colorName ? `Available in ${product.colorName}.` : '';
+
+  const fallbackTitle = `${product.name} — Luxury Handcrafted ${product.category || 'Leather Goods'} | STUNNING BIRDS`;
+  const fallbackDesc = rawDesc.length >= 60
+    ? `${product.name}: ${rawDesc.slice(0, 140)}... Bespoke personalization & complimentary shipping.`
+    : `Discover ${product.name} — ${materialInfo} ${colorInfo} Bespoke monogramming & complimentary express courier nationwide.`;
+
+  return {
+    seoTitle: customSeoTitle || fallbackTitle,
+    seoMetaDescription: customSeoDescription || fallbackDesc,
+    isCustomTitle: Boolean(customSeoTitle),
+    isCustomDescription: Boolean(customSeoDescription),
+  };
+};
+
+/**
  * Applies dynamic SEO metadata for a single product page.
- * Uses real product fields from Supabase (title, description, price, category, images, reviews).
+ * Uses real product fields from Supabase (title, description, price, category, images, reviews, custom SEO).
  */
 export const applyProductSEO = (product: Product) => {
   if (typeof document === 'undefined' || !product) return;
@@ -103,19 +133,15 @@ export const applyProductSEO = (product: Product) => {
 
   const sellingPrice = product.sellingPrice || product.price || 0;
   const rawDesc = (product.description || '').replace(/\s+/g, ' ').trim();
-  const materialInfo = product.material ? `Handcrafted in ${product.material}.` : 'Handcrafted full-grain leather.';
-  const colorInfo = product.colorName ? `Available in ${product.colorName}.` : '';
-  
-  // Clean meta description with optimal length (140 - 160 characters)
-  const metaDescription = rawDesc.length >= 60
-    ? `${product.name}: ${rawDesc.slice(0, 140)}... Bespoke personalization & complimentary shipping.`
-    : `Discover ${product.name} — ${materialInfo} ${colorInfo} Bespoke monogramming & complimentary express courier nationwide.`;
+
+  // Compute effective dynamic SEO title & meta description (prioritizing custom fields saved with product)
+  const { seoTitle: effectiveTitle, seoMetaDescription: effectiveDescription } = getEffectiveProductSEO(product);
 
   // 1. Dynamic Page Title
-  document.title = `${product.name} — Luxury Handcrafted ${product.category || 'Leather Goods'} | STUNNING BIRDS`;
+  document.title = effectiveTitle;
 
   // 2. Dynamic Meta Description & Keywords
-  setMetaTag('name', 'description', metaDescription);
+  setMetaTag('name', 'description', effectiveDescription);
   setMetaTag('name', 'keywords', `${product.name}, ${product.category}, luxury leather wallet, handcrafted wallet, vegetable tanned leather, bespoke monogram, ${product.colorName || 'leather'}`);
   setMetaTag('name', 'author', 'STUNNING BIRDS Atelier');
 
@@ -123,8 +149,8 @@ export const applyProductSEO = (product: Product) => {
   setCanonicalLink(canonicalUrl);
 
   // 4. OpenGraph Metadata (Facebook, WhatsApp, LinkedIn, iMessage)
-  setMetaTag('property', 'og:title', `${product.name} — STUNNING BIRDS Atelier`);
-  setMetaTag('property', 'og:description', metaDescription);
+  setMetaTag('property', 'og:title', effectiveTitle);
+  setMetaTag('property', 'og:description', effectiveDescription);
   setMetaTag('property', 'og:image', primaryImage);
   setMetaTag('property', 'og:image:alt', `${product.name} in ${product.colorName || 'handcrafted finish'}`);
   setMetaTag('property', 'og:url', canonicalUrl);
@@ -139,8 +165,8 @@ export const applyProductSEO = (product: Product) => {
 
   // 5. Twitter / X Card Metadata
   setMetaTag('name', 'twitter:card', 'summary_large_image');
-  setMetaTag('name', 'twitter:title', `${product.name} — STUNNING BIRDS`);
-  setMetaTag('name', 'twitter:description', metaDescription);
+  setMetaTag('name', 'twitter:title', effectiveTitle);
+  setMetaTag('name', 'twitter:description', effectiveDescription);
   setMetaTag('name', 'twitter:image', primaryImage);
   setMetaTag('name', 'twitter:image:alt', `${product.name} - Handcrafted luxury leather`);
   setMetaTag('name', 'twitter:site', '@stunningbirds');
@@ -152,9 +178,9 @@ export const applyProductSEO = (product: Product) => {
   const jsonLdData: Record<string, any> = {
     '@context': 'https://schema.org/',
     '@type': 'Product',
-    'name': product.name,
+    'name': effectiveTitle,
     'image': product.images && product.images.length > 0 ? product.images : [primaryImage],
-    'description': rawDesc || `Handcrafted ${product.category} crafted from ${product.material || 'fine leather'}.`,
+    'description': effectiveDescription || rawDesc || `Handcrafted ${product.category} crafted from ${product.material || 'fine leather'}.`,
     'sku': product.sku || product.skuId || `SB-${product.id}`,
     'mpn': product.sku || product.skuId || `SB-${product.id}`,
     'category': product.category || 'Leather Goods',
