@@ -125,6 +125,7 @@ export const AdminReturnsManagement: React.FC<AdminReturnsManagementProps> = ({ 
         headers: {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
+        cache: 'no-store',
       });
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'Failed to load return requests');

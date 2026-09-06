@@ -289,8 +289,8 @@ function applyReturnFilter(query: any, idOrCode: string) {
 }
 
 // Module-level in-memory stores for returns and return audit status history
-const returnRequests: ReturnRequest[] = [];
-const returnStatusHistory: ReturnStatusHistory[] = [];
+let returnRequests: ReturnRequest[] = [];
+let returnStatusHistory: ReturnStatusHistory[] = [];
 
 // Helper: records a status transition in public.return_status_history with idempotency and service-role priority
 interface RecordHistoryParams {
@@ -733,8 +733,6 @@ async function startServer() {
     ...o,
     shippingLabel: o.shippingLabel || generateShippingLabelData(o, undefined, INITIAL_PRODUCTS),
   }));
-  let returnRequests: ReturnRequest[] = [];
-  let returnStatusHistory: ReturnStatusHistory[] = [];
   let subscribers: string[] = [];
 
   // ================= API ROUTES =================
@@ -1181,6 +1179,8 @@ async function startServer() {
 
     try {
       await client.from('order_items').delete().in('order_id', targetIds);
+      // Delete any associated return requests for this order
+      await client.from('return_requests').delete().in('order_id', targetIds);
       const { error, count } = await client.from('orders').delete({ count: 'exact' }).in('id', targetIds);
 
       if (error) {
@@ -1188,6 +1188,7 @@ async function startServer() {
       }
 
       orders = orders.filter(o => !targetIds.includes(o.id) && !targetIds.includes(o.id.replace(/^#/, '')));
+      returnRequests = returnRequests.filter(r => !targetIds.includes(r.orderId) && !targetIds.includes(r.orderId.replace(/^#/, '')));
 
       res.json({
         success: true,
@@ -3058,6 +3059,11 @@ async function startServer() {
 
   // 19.2 GET /api/returns: List return requests (Customer sees own, Admin sees all)
   app.get('/api/returns', requireAuth, async (req, res) => {
+    // Prevent client/browser caching to guarantee authoritative Supabase data
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const user = (req as any).user;
     const isAdmin = (req as any).isAdmin;
     const authToken = (req as any).authToken;
@@ -3086,10 +3092,27 @@ async function startServer() {
       const { data: dbReturns, error } = await query;
 
       let results: ReturnRequest[] = [];
-      if (!error && dbReturns && dbReturns.length > 0) {
+      if (!error && Array.isArray(dbReturns)) {
+        // Supabase is authoritative
         results = dbReturns.map(mapSupabaseReturnRequest);
-      } else {
-        // Fallback to in-memory store
+
+        // Prune deleted records from in-memory cache to prevent resurrection
+        const currentDbIds = new Set(dbReturns.map((r: any) => r.return_request_id || r.id));
+        if (isAdmin) {
+          returnRequests = returnRequests.filter(r => currentDbIds.has(r.returnRequestId) || currentDbIds.has(r.id));
+        } else {
+          returnRequests = returnRequests.filter(r => {
+            const belongsToCustomer = (r.customerId && r.customerId === user.id) ||
+              (r.customerEmail && r.customerEmail.toLowerCase() === user.email.toLowerCase());
+            if (belongsToCustomer) {
+              return currentDbIds.has(r.returnRequestId) || currentDbIds.has(r.id);
+            }
+            return true;
+          });
+        }
+      } else if (error) {
+        // Fallback to in-memory store ONLY on true database error/outage
+        console.warn('Notice: Supabase return requests query encountered error, using in-memory store:', error.message);
         results = [...returnRequests];
         if (!isAdmin) {
           results = results.filter(r => 
@@ -3130,6 +3153,10 @@ async function startServer() {
 
   // 19.3 GET /api/returns/:id: Fetch single return request with audit history
   app.get('/api/returns/:id', requireAuth, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const { id } = req.params;
     const user = (req as any).user;
     const isAdmin = (req as any).isAdmin;
@@ -3145,9 +3172,18 @@ async function startServer() {
       const { data: dbReturn, error } = await query.maybeSingle();
 
       let result: ReturnRequest | null = null;
-      if (!error && dbReturn) {
-        result = mapSupabaseReturnRequest(dbReturn);
+      if (!error) {
+        if (dbReturn) {
+          result = mapSupabaseReturnRequest(dbReturn);
+        } else {
+          // Record was confirmed deleted or does not exist in Supabase
+          const cleanId = decodeURIComponent(String(id || '')).trim();
+          returnRequests = returnRequests.filter(r => r.id !== cleanId && r.returnRequestId !== cleanId);
+          return res.status(404).json({ success: false, error: 'Return request not found.' });
+        }
       } else {
+        // Fallback only if database communication error
+        console.warn('Notice: Supabase return details query error, using in-memory fallback:', error.message);
         result = returnRequests.find(r => r.id === id || r.returnRequestId === id) || null;
       }
 
@@ -3165,6 +3201,44 @@ async function startServer() {
       return res.json({ success: true, returnRequest: result });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: 'Failed to fetch return details.' });
+    }
+  });
+
+  // 19.3.1 DELETE /api/admin/returns/:id: Permanently delete return request (Admin only)
+  app.delete(['/api/admin/returns/:id', '/api/returns/:id'], sensitiveActionLimiter, requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const cleanId = decodeURIComponent(String(id || '')).trim();
+    const client = getServiceSupabase() || getScopedSupabase((req as any).authToken);
+
+    try {
+      // 1. Delete associated audit history
+      try {
+        let histQuery = client.from('return_status_history').delete();
+        histQuery = applyReturnFilter(histQuery, cleanId);
+        await histQuery;
+      } catch (histErr) {
+        console.warn('Notice: Error clearing return status history:', histErr);
+      }
+
+      // 2. Delete return request from Supabase
+      let delQuery = client.from('return_requests').delete({ count: 'exact' });
+      delQuery = applyReturnFilter(delQuery, cleanId);
+      const { error: delErr, count } = await delQuery;
+
+      if (delErr) {
+        return res.status(500).json({ success: false, error: `Failed to delete return request from Supabase: ${delErr.message}` });
+      }
+
+      // 3. Purge from in-memory cache
+      returnRequests = returnRequests.filter(r => r.id !== cleanId && r.returnRequestId !== cleanId);
+
+      return res.json({
+        success: true,
+        message: `Return request ${cleanId} permanently deleted from Supabase`,
+        deletedCount: count,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Error deleting return request.' });
     }
   });
 
@@ -3350,11 +3424,11 @@ async function startServer() {
         });
       }
 
-      const existingReturn = dbCurrent ? mapSupabaseReturnRequest(dbCurrent) : returnRequests.find(r => r.id === id || r.returnRequestId === id);
-
-      if (!existingReturn) {
-        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      if (!dbCurrent) {
+        return res.status(404).json({ success: false, error: 'Return request not found in database.' });
       }
+
+      const existingReturn = mapSupabaseReturnRequest(dbCurrent);
 
       if (existingReturn.status === 'RETURN_REJECTED' && existingReturn.rejectionReason === rejectionReason) {
         return res.json({
@@ -3476,11 +3550,11 @@ async function startServer() {
       checkQuery = applyReturnFilter(checkQuery, id);
       const { data: dbCurrent } = await checkQuery.maybeSingle();
 
-      const existingReturn = dbCurrent ? mapSupabaseReturnRequest(dbCurrent) : returnRequests.find(r => r.id === id || r.returnRequestId === id);
-
-      if (!existingReturn) {
-        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      if (!dbCurrent) {
+        return res.status(404).json({ success: false, error: 'Return request not found in database.' });
       }
+
+      const existingReturn = mapSupabaseReturnRequest(dbCurrent);
 
       const now = new Date().toISOString();
       const oldStatus = existingReturn.status || 'RETURN_APPROVED';
@@ -3574,11 +3648,11 @@ async function startServer() {
       checkQuery = applyReturnFilter(checkQuery, id);
       const { data: dbCurrent } = await checkQuery.maybeSingle();
 
-      const existingReturn = dbCurrent ? mapSupabaseReturnRequest(dbCurrent) : returnRequests.find(r => r.id === id || r.returnRequestId === id);
-
-      if (!existingReturn) {
-        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      if (!dbCurrent) {
+        return res.status(404).json({ success: false, error: 'Return request not found in database.' });
       }
+
+      const existingReturn = mapSupabaseReturnRequest(dbCurrent);
 
       const now = new Date().toISOString();
       const oldStatus = existingReturn.status || 'RETURN_RECEIVED';
@@ -3672,11 +3746,11 @@ async function startServer() {
       checkQuery = applyReturnFilter(checkQuery, id);
       const { data: dbReturn } = await checkQuery.maybeSingle();
 
-      const returnReq: ReturnRequest | null = dbReturn ? mapSupabaseReturnRequest(dbReturn) : returnRequests.find(r => r.id === id || r.returnRequestId === id) || null;
-
-      if (!returnReq) {
-        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      if (!dbReturn) {
+        return res.status(404).json({ success: false, error: 'Return request not found in database.' });
       }
+
+      const returnReq: ReturnRequest = mapSupabaseReturnRequest(dbReturn);
 
       if (returnReq.status !== 'INSPECTION_COMPLETED' && returnReq.inspectionResult !== 'PASSED' && returnReq.status !== 'REFUNDED' && returnReq.status !== 'RETURN_COMPLETED') {
         return res.status(400).json({
@@ -3802,11 +3876,11 @@ async function startServer() {
       checkQuery = applyReturnFilter(checkQuery, id);
       const { data: dbCurrent } = await checkQuery.maybeSingle();
 
-      const existingReturn = dbCurrent ? mapSupabaseReturnRequest(dbCurrent) : returnRequests.find(r => r.id === id || r.returnRequestId === id);
-
-      if (!existingReturn) {
-        return res.status(404).json({ success: false, error: 'Return request not found.' });
+      if (!dbCurrent) {
+        return res.status(404).json({ success: false, error: 'Return request not found in database.' });
       }
+
+      const existingReturn = mapSupabaseReturnRequest(dbCurrent);
 
       const now = new Date().toISOString();
       const oldStatus = existingReturn.status;

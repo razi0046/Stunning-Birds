@@ -120,6 +120,14 @@
   object-fit: contain !important;
   width: 100% !important;
   height: 100% !important;
+  aspect-ratio: 4 / 5;
+  display: block;
+}
+
+@media (max-width: 639px) {
+  #product-detail-image-gallery-container img {
+    aspect-ratio: 3 / 4;
+  }
 }
 
 

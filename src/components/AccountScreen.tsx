@@ -162,6 +162,7 @@ export const AccountScreen: React.FC = () => {
         headers: {
           Authorization: `Bearer ${token}`,
         },
+        cache: 'no-store',
       });
 
       if (!res.ok) return;

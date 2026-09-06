@@ -336,8 +336,10 @@ export const ProductDetailScreen: React.FC = () => {
                     src={img}
                     alt={`${selectedProduct.name} - Handcrafted ${selectedProduct.material || 'leather'} in ${selectedProduct.colorName} - View ${idx + 1}`}
                     referrerPolicy="no-referrer"
-                    className="w-full h-full object-contain object-center select-none"
-                    style={{ objectFit: 'contain', width: '100%', height: '100%' }}
+                    loading="lazy"
+                    decoding="async"
+                    className="w-full h-full object-contain object-center select-none aspect-3/4 sm:aspect-4/5"
+                    style={{ objectFit: 'contain', width: '100%', height: '100%', aspectRatio: '4 / 5' }}
                     draggable={false}
                   />
                 </div>
@@ -387,12 +389,14 @@ export const ProductDetailScreen: React.FC = () => {
                   src={selectedProduct.images[activeImageIndex] || selectedProduct.images[0]}
                   alt={`${selectedProduct.name} - Luxury Handcrafted ${selectedProduct.category} in ${selectedProduct.colorName}`}
                   referrerPolicy="no-referrer"
+                  loading="lazy"
+                  decoding="async"
                   initial={{ opacity: 0.4 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0.4 }}
                   transition={{ duration: 0.25, ease: 'easeOut' }}
-                  className="w-full h-full object-contain object-center select-none"
-                  style={{ objectFit: 'contain', width: '100%', height: '100%' }}
+                  className="w-full h-full object-contain object-center select-none aspect-3/4 lg:aspect-4/5"
+                  style={{ objectFit: 'contain', width: '100%', height: '100%', aspectRatio: '4 / 5' }}
                   draggable={false}
                 />
               </AnimatePresence>
@@ -454,7 +458,10 @@ export const ProductDetailScreen: React.FC = () => {
                     src={img}
                     alt={`${selectedProduct.name} angle ${idx + 1} - ${selectedProduct.colorName}`}
                     referrerPolicy="no-referrer"
-                    className="w-full h-full object-contain object-center"
+                    loading="lazy"
+                    decoding="async"
+                    className="w-full h-full object-contain object-center aspect-4/3"
+                    style={{ objectFit: 'contain', width: '100%', height: '100%', aspectRatio: '4 / 3' }}
                     draggable={false}
                   />
                   <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-[#181614]/80 text-[#f5f1eb] text-[9px] font-semibold tracking-wide rounded-xs pointer-events-none">

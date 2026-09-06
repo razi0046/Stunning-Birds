@@ -396,9 +396,6 @@ export const HomeScreen: React.FC = () => {
                 decoding="async"
                 className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-700"
               />
-              <div className="absolute bottom-3 right-3 bg-black/75 backdrop-blur-xs text-[#faf8f5] text-[10px] uppercase tracking-widest px-3 py-1.5 font-medium shadow-sm">
-                Day 1 vs. Year 5 Patina
-              </div>
             </div>
           </motion.div>
 

@@ -98,6 +98,7 @@ export const CustomerReturnsList: React.FC<CustomerReturnsListProps> = ({
         headers: {
           Authorization: `Bearer ${token}`,
         },
+        cache: 'no-store',
       });
       const text = await res.text();
       let data: any;
