@@ -8,6 +8,7 @@ import { uploadProductImagesList,
   deleteProductImagesFromStorage, 
   deleteProductFolderFromStorage 
 } from '../utils/supabaseStorage';
+import { sendOrderConfirmationEmail } from '../services/emailService';
 
 export type ScreenView = 
   | 'home'
@@ -1240,6 +1241,12 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setLatestPlacedOrder(newOrder);
     setCart([]);
     showToast('Your bespoke commission has been placed with the atelier');
+
+    // Automatically trigger confirmation email via Supabase Edge Function (non-blocking)
+    sendOrderConfirmationEmail(newOrder.id, newOrder.customer?.email).catch(emailErr => {
+      console.warn('Order confirmation email trigger notice (COD):', emailErr);
+    });
+
     return newOrder;
   };
 
@@ -1483,6 +1490,12 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }));
 
     showToast('Payment verified successfully. Welcome to Stunning Birds Atelier.');
+
+    // Automatically trigger confirmation email via Supabase Edge Function (non-blocking)
+    sendOrderConfirmationEmail(newOrder.id, newOrder.customer?.email).catch(emailErr => {
+      console.warn('Order confirmation email trigger notice (Online/Razorpay):', emailErr);
+    });
+
     return newOrder;
   };
 
