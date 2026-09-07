@@ -68,10 +68,10 @@ export const Navbar: React.FC = () => {
                 id="nav-shop-btn"
                 onClick={() => handleNavClick('shop', 'All')}
                 className={`relative px-2.5 xl:px-3 py-2 group cursor-pointer transition-colors duration-200 ${
-                  currentScreen === 'shop' ? 'text-[#8c562e] font-semibold' : 'text-[#2e2a27] hover:text-[#8c562e]'
+                  currentScreen === 'shop' ? 'text-[#8c562e]' : 'text-[#2e2a27] hover:text-[#8c562e]'
                 }`}
               >
-                <span>Shop</span>
+                <span className="font-bold">Shop</span>
                 <span
                   className={`absolute bottom-0.5 left-2.5 right-2.5 h-[2px] bg-[#8c562e] rounded-full transition-all duration-300 origin-left ${
                     currentScreen === 'shop'
@@ -87,7 +87,7 @@ export const Navbar: React.FC = () => {
                 onClick={() => handleNavClick('shop', 'Bifold Wallets')}
                 className="relative px-2.5 xl:px-3 py-2 group cursor-pointer transition-colors duration-200 text-[#2e2a27] hover:text-[#8c562e]"
               >
-                <span>Collections</span>
+                <span className="font-bold">Collections</span>
                 <span className="absolute bottom-0.5 left-2.5 right-2.5 h-[2px] bg-[#8c562e] rounded-full transition-all duration-300 origin-left scale-x-0 opacity-0 group-hover:scale-x-100 group-hover:opacity-100" />
               </button>
 
@@ -97,7 +97,7 @@ export const Navbar: React.FC = () => {
                 onClick={() => handleNavClick('shop', 'Accessories')}
                 className="relative px-2.5 xl:px-3 py-2 group cursor-pointer transition-colors duration-200 text-[#2e2a27] hover:text-[#8c562e] whitespace-nowrap"
               >
-                <span>New Arrivals</span>
+                <span className="font-bold">New Arrivals</span>
                 <span className="absolute bottom-0.5 left-2.5 right-2.5 h-[2px] bg-[#8c562e] rounded-full transition-all duration-300 origin-left scale-x-0 opacity-0 group-hover:scale-x-100 group-hover:opacity-100" />
               </button>
 
@@ -106,10 +106,10 @@ export const Navbar: React.FC = () => {
                 id="nav-home-story-btn"
                 onClick={() => handleNavClick('home')}
                 className={`relative px-2.5 xl:px-3 py-2 group cursor-pointer transition-colors duration-200 ${
-                  currentScreen === 'home' ? 'text-[#8c562e] font-semibold' : 'text-[#2e2a27] hover:text-[#8c562e]'
+                  currentScreen === 'home' ? 'text-[#8c562e]' : 'text-[#2e2a27] hover:text-[#8c562e]'
                 }`}
               >
-                <span>Journal</span>
+                <span className="font-bold">Journal</span>
                 <span
                   className={`absolute bottom-0.5 left-2.5 right-2.5 h-[2px] bg-[#8c562e] rounded-full transition-all duration-300 origin-left ${
                     currentScreen === 'home'

@@ -842,10 +842,16 @@ CREATE INDEX IF NOT EXISTS idx_return_requests_customer_email ON public.return_r
 CREATE INDEX IF NOT EXISTS idx_return_requests_status ON public.return_requests(status);
 CREATE INDEX IF NOT EXISTS idx_return_requests_created_at ON public.return_requests(created_at DESC);
 
--- Partial index to prevent duplicate active/pending return requests for the same order item
-CREATE UNIQUE INDEX IF NOT EXISTS idx_active_return_per_item 
+-- Permanent unique indexes to prevent multiple return requests for the exact same order item or product
+DROP INDEX IF EXISTS public.idx_active_return_per_item;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_return_per_order_item 
   ON public.return_requests(order_id, order_item_id) 
-  WHERE status != 'RETURN_REJECTED' AND order_item_id IS NOT NULL;
+  WHERE order_item_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_return_per_order_product 
+  ON public.return_requests(order_id, product_id) 
+  WHERE product_id IS NOT NULL;
 
 -- ==============================================================================
 -- 18. RETURN STATUS AUDIT TRAIL TABLE

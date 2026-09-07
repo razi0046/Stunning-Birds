@@ -82,6 +82,11 @@ export const ReturnRequestModal: React.FC<ReturnRequestModalProps> = ({
     e.preventDefault();
     setError(null);
 
+    if (existingReturn) {
+      setError('Return already requested for this product. Products are permanently ineligible for another return request once submitted.');
+      return;
+    }
+
     if (description.trim().length < 10) {
       setError('Please provide a detailed description (at least 10 characters) explaining the issue.');
       return;
@@ -141,6 +146,7 @@ export const ReturnRequestModal: React.FC<ReturnRequestModalProps> = ({
 
       setSuccessData(data.returnRequest);
       onReturnCreated(data.returnRequest);
+      window.dispatchEvent(new CustomEvent('returns-updated'));
     } catch (err: any) {
       setError(err?.message || 'A network error occurred. Please check your connection.');
     } finally {
@@ -267,9 +273,12 @@ export const ReturnRequestModal: React.FC<ReturnRequestModalProps> = ({
                 <div className="p-4 bg-[#fcfaf7] border border-[#d4af37]/60 text-[#8c562e] rounded-lg text-xs flex items-center space-x-2.5">
                   <RotateCcw className="w-4 h-4 text-[#8c562e] shrink-0" />
                   <div>
-                    <p className="font-semibold text-sm">Return requested for this product.</p>
+                    <p className="font-semibold text-sm">Return already requested for this product.</p>
                     <p className="text-[11px] text-neutral-600 mt-0.5">
-                      Request ID: <span className="font-mono font-bold text-neutral-900">{existingReturn.returnRequestId}</span> (Status: {existingReturn.status.replace(/_/g, ' ')})
+                      Request ID: <span className="font-mono font-bold text-neutral-900">{existingReturn.returnRequestId}</span> • Status: <span className="font-semibold text-neutral-900">{existingReturn.status.replace(/_/g, ' ')}</span>
+                    </p>
+                    <p className="text-[10px] text-[#8c562e] font-medium mt-0.5">
+                      This product is permanently ineligible for another return request.
                     </p>
                   </div>
                 </div>

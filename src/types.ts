@@ -237,6 +237,8 @@ export interface Order {
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   razorpaySignature?: string;
+  createdAt?: string;
+  created_at?: string;
 }
 
 export type OrderItem = Order['items'][number];

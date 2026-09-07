@@ -2839,7 +2839,7 @@ async function startServer() {
         });
       }
 
-      // 5. Match order item
+      // 5. Match order item and verify it belongs to this order
       const orderItems = orderRow?.order_items || inMemoryOrder?.items || [];
       let matchedItem: any = null;
 
@@ -2849,8 +2849,24 @@ async function startServer() {
       if (!matchedItem && productId) {
         matchedItem = orderItems.find((it: any) => it.product_id === productId || it.productId === productId);
       }
+
+      // If a specific item or product ID was requested but not found in this order, reject
+      if ((orderItemId || productId) && !matchedItem) {
+        return res.status(400).json({
+          success: false,
+          error: 'The specified product does not belong to this order.',
+        });
+      }
+
       if (!matchedItem && orderItems.length > 0) {
         matchedItem = orderItems[0];
+      }
+
+      if (!matchedItem) {
+        return res.status(400).json({
+          success: false,
+          error: 'No valid products found for this order to request a return.',
+        });
       }
 
       const resolvedProductName = matchedItem?.product_name || matchedItem?.productName || 'STUNNING BIRDS Handcrafted Leather Piece';
@@ -2864,43 +2880,89 @@ async function startServer() {
       const customerEmail = orderRow?.customer_email || inMemoryOrder?.customer?.email || user.email;
       const customerPhone = orderRow?.shipping_address?.phone || inMemoryOrder?.shippingAddress?.phone || undefined;
 
-      // 6. Check for duplicate active return requests on this order item
+      // 6. Check for ANY previous return request for this order and product (PERMANENT INELIGIBILITY)
+      // Once a customer has submitted a return request for a product in an order, that exact product
+      // must NEVER be eligible for another return request for that same order, regardless of status.
       const canonicalOrderId = orderRow?.id || inMemoryOrder?.id || orderId;
-      const resolvedOrderItemId = matchedItem?.id || undefined;
+      const cleanOrderId = canonicalOrderId.replace(/^#/, '').trim();
+      const orderIdVariants = Array.from(new Set([
+        canonicalOrderId,
+        cleanOrderId,
+        `#${cleanOrderId}`,
+        orderId,
+      ])).filter(Boolean);
+
+      const resolvedOrderItemId = matchedItem?.id || (matchedItem as any)?.orderItemId || undefined;
       const resolvedProductId = matchedItem?.product_id || matchedItem?.productId || undefined;
 
       let duplicateExists = false;
-      try {
-        let dupQuery = client
-          .from('return_requests')
-          .select('id, return_request_id, status')
-          .eq('order_id', canonicalOrderId)
-          .neq('status', 'RETURN_REJECTED');
+      let existingRecord: any = null;
 
+      try {
+        const queryClient = getServiceSupabase() || client;
+        let dupQuery = queryClient
+          .from('return_requests')
+          .select('id, return_request_id, status, order_id, order_item_id, product_id, product_name')
+          .in('order_id', orderIdVariants);
+
+        // Build item identifier conditions
+        const orClauses: string[] = [];
         if (resolvedOrderItemId) {
-          dupQuery = dupQuery.eq('order_item_id', resolvedOrderItemId);
-        } else if (resolvedProductId) {
-          dupQuery = dupQuery.eq('product_id', resolvedProductId);
+          orClauses.push(`order_item_id.eq.${resolvedOrderItemId}`);
+        }
+        if (resolvedProductId) {
+          orClauses.push(`product_id.eq.${resolvedProductId}`);
         }
 
-        const { data: dupRows } = await dupQuery;
-        if (dupRows && dupRows.length > 0) {
+        if (orClauses.length > 0) {
+          dupQuery = dupQuery.or(orClauses.join(','));
+        }
+
+        const { data: dupRows, error: dupErr } = await dupQuery;
+        if (!dupErr && dupRows && dupRows.length > 0) {
           duplicateExists = true;
+          existingRecord = dupRows[0];
+        } else if (orderItems.length <= 1) {
+          // If order only has 1 item, ANY existing return request for this order in Supabase matches
+          const { data: anyOrderReturns } = await queryClient
+            .from('return_requests')
+            .select('id, return_request_id, status')
+            .in('order_id', orderIdVariants)
+            .limit(1);
+          if (anyOrderReturns && anyOrderReturns.length > 0) {
+            duplicateExists = true;
+            existingRecord = anyOrderReturns[0];
+          }
         }
       } catch (dErr) {
-        // Fallback to in-memory check
-        const inMemDup = returnRequests.find(r => 
-          r.orderId === canonicalOrderId && 
-          r.status !== 'RETURN_REJECTED' && 
-          (r.orderItemId === resolvedOrderItemId || r.productId === resolvedProductId)
-        );
-        if (inMemDup) duplicateExists = true;
+        console.warn('Error querying existing return_requests in Supabase:', dErr);
+      }
+
+      // Check in-memory cache as well
+      if (!duplicateExists) {
+        const inMemDup = returnRequests.find(r => {
+          const rOrderClean = (r.orderId || '').replace(/^#/, '').trim().toLowerCase();
+          const targetClean = cleanOrderId.toLowerCase();
+          if (rOrderClean !== targetClean) return false;
+
+          if (resolvedOrderItemId && r.orderItemId && r.orderItemId === resolvedOrderItemId) return true;
+          if (resolvedProductId && r.productId && r.productId === resolvedProductId) return true;
+          if (resolvedProductName && r.productName && r.productName.trim().toLowerCase() === resolvedProductName.trim().toLowerCase()) return true;
+          if (orderItems.length <= 1) return true;
+          return false;
+        });
+        if (inMemDup) {
+          duplicateExists = true;
+          existingRecord = inMemDup;
+        }
       }
 
       if (duplicateExists) {
         return res.status(409).json({
           success: false,
-          error: 'An active return request already exists for this item. Please check your existing return status under My Returns.',
+          error: 'A return request has already been submitted for this product. Once a return request is submitted, the product is permanently ineligible for another return request.',
+          existingReturnId: existingRecord?.return_request_id || existingRecord?.returnRequestId,
+          status: existingRecord?.status,
         });
       }
 
@@ -2947,6 +3009,13 @@ async function startServer() {
           .single();
 
         if (insErr) {
+          // Check for unique constraint violation (code 23505) from database
+          if (insErr.code === '23505' || insErr.message?.includes('duplicate key') || insErr.message?.includes('unique constraint') || insErr.message?.includes('idx_return_per_order')) {
+            return res.status(409).json({
+              success: false,
+              error: 'A return request has already been submitted for this product. Once a return request is submitted, the product is permanently ineligible for another return request.',
+            });
+          }
           console.warn('Supabase return request insert error (falling back to memory):', insErr);
         } else if (insData) {
           // Record initial audit history using service role client or trigger
@@ -3239,6 +3308,33 @@ async function startServer() {
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err?.message || 'Error deleting return request.' });
+    }
+  });
+
+  // 19.3b GET /api/admin/returns/pending-count: Pending return requests requiring admin attention (status = RETURN_REQUESTED)
+  app.get('/api/admin/returns/pending-count', requireAdmin, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    const dbClient = getServiceSupabase();
+    try {
+      if (dbClient) {
+        const { count, error } = await dbClient
+          .from('return_requests')
+          .select('*', { count: 'exact', head: true })
+          .eq('status', 'RETURN_REQUESTED');
+
+        if (!error && typeof count === 'number') {
+          return res.json({ success: true, count, status: 'RETURN_REQUESTED' });
+        }
+      }
+
+      // In-memory fallback
+      const inMemoryCount = returnRequests.filter(r => r.status === 'RETURN_REQUESTED').length;
+      return res.json({ success: true, count: inMemoryCount, status: 'RETURN_REQUESTED' });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Error fetching pending returns count.' });
     }
   });
 

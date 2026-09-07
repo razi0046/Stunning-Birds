@@ -178,21 +178,34 @@ export const AccountScreen: React.FC = () => {
 
   React.useEffect(() => {
     fetchCustomerReturns();
+
+    // Realtime Postgres sync: Any status changes (admin approved, rejected, etc.) update instantly
+    const returnsChannel = supabase
+      .channel('customer_account_returns_realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'return_requests' },
+        () => {
+          fetchCustomerReturns();
+        }
+      )
+      .subscribe();
+
+    const handleSync = () => {
+      fetchCustomerReturns();
+    };
+    window.addEventListener('focus', handleSync);
+    window.addEventListener('returns-updated', handleSync);
+
+    return () => {
+      supabase.removeChannel(returnsChannel);
+      window.removeEventListener('focus', handleSync);
+      window.removeEventListener('returns-updated', handleSync);
+    };
   }, [fetchCustomerReturns, userProfile.id, userProfile.email]);
 
-  const NON_REJECTED_RETURN_STATUSES: ReturnStatus[] = [
-    'RETURN_REQUESTED',
-    'RETURN_APPROVED',
-    'PICKUP_SCHEDULED',
-    'PICKED_UP',
-    'IN_TRANSIT',
-    'RETURN_RECEIVED',
-    'INSPECTION_COMPLETED',
-    'REFUND_INITIATED',
-    'REFUNDED',
-    'RETURN_COMPLETED',
-  ];
-
+  // Once a customer has submitted a return request for a product in an order, that exact product
+  // must NEVER be eligible for another return request for that same order, regardless of status (including rejected).
   const getExistingReturnForProduct = (
     order: Order,
     item?: OrderItem | { productId?: string; productName?: string; id?: string; sku?: string; name?: string }
@@ -200,12 +213,10 @@ export const AccountScreen: React.FC = () => {
     const cleanOrderId = (order.id || '').replace(/^#/, '').trim().toLowerCase();
 
     return customerReturns.find(r => {
-      if (!NON_REJECTED_RETURN_STATUSES.includes(r.status)) return false;
-
       const rOrderId = (r.orderId || '').replace(/^#/, '').trim().toLowerCase();
       if (rOrderId !== cleanOrderId) return false;
 
-      // If no specific item passed (order-level check)
+      // If no specific item passed
       if (!item) {
         return true;
       }
@@ -227,10 +238,22 @@ export const AccountScreen: React.FC = () => {
     });
   };
 
+  const areAllOrderItemsReturned = (order: Order): boolean => {
+    if (!order.items || order.items.length === 0) {
+      return !!getExistingReturnForProduct(order);
+    }
+    return order.items.every(it => !!getExistingReturnForProduct(order, it));
+  };
+
   const handleOpenReturnModal = (order: Order, item?: OrderItem, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    const targetItem = item || order.items?.[0];
+    if (targetItem && getExistingReturnForProduct(order, targetItem)) {
+      showToast('Return already requested for this product.');
+      return;
+    }
     setReturnModalOrder(order);
-    setReturnModalItem(item);
+    setReturnModalItem(targetItem);
     setIsReturnModalOpen(true);
   };
 
@@ -336,6 +359,12 @@ export const AccountScreen: React.FC = () => {
   const handleDownloadInvoice = async (order: Order, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
 
+    // Enforce delivery requirement: invoice can only be downloaded once delivered
+    if (order.fulfillmentStatus !== 'DELIVERED') {
+      showToast('Invoice is available for download once your order has been delivered.');
+      return;
+    }
+
     // Security check: verify logged-in customer ownership
     const authCheck = verifyOrderOwnership(order, userProfile);
     if (!authCheck.allowed) {
@@ -359,6 +388,10 @@ export const AccountScreen: React.FC = () => {
   // Handler for previewing invoice modal
   const handleOpenPreview = (order: Order, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    if (order.fulfillmentStatus !== 'DELIVERED') {
+      showToast('Invoice is available once your order has been delivered.');
+      return;
+    }
     setPreviewOrder(order);
     setIsInvoiceModalOpen(true);
   };
@@ -770,7 +803,7 @@ export const AccountScreen: React.FC = () => {
                         getExistingReturnForProduct(latestOrder, latestOrder.items?.[0]) ? (
                           <p className="text-xs font-medium text-[#8c562e] flex items-center gap-1.5 px-3 py-2 bg-[#fcfaf7] border border-[#d4af37]/70 rounded-xs shadow-2xs">
                             <RotateCcw className="w-3.5 h-3.5 text-[#8c562e] shrink-0" />
-                            <span>Return requested for this product.</span>
+                            <span>Return already requested for this product.</span>
                           </p>
                         ) : (
                           <motion.button
@@ -786,26 +819,30 @@ export const AccountScreen: React.FC = () => {
                         )
                       )}
 
-                      <motion.button
-                        id={`download-invoice-btn-${latestOrder.id.replace(/[^a-zA-Z0-9-]/g, '')}`}
-                        whileHover={{ scale: 1.02 }}
-                        whileTap={{ scale: 0.98 }}
-                        disabled={downloadingOrderId === latestOrder.id}
-                        onClick={(e) => handleDownloadInvoice(latestOrder, e)}
-                        className="px-4 py-2 bg-[#181614] hover:bg-[#8c562e] text-white text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                        title="Download Tax Invoice PDF"
-                      >
-                        <Download className="w-3.5 h-3.5 text-[#d4af37]" />
-                        <span>{downloadingOrderId === latestOrder.id ? 'Generating...' : 'Download Invoice'}</span>
-                      </motion.button>
+                      {latestOrder.fulfillmentStatus === 'DELIVERED' && (
+                        <>
+                          <motion.button
+                            id={`download-invoice-btn-${latestOrder.id.replace(/[^a-zA-Z0-9-]/g, '')}`}
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                            disabled={downloadingOrderId === latestOrder.id}
+                            onClick={(e) => handleDownloadInvoice(latestOrder, e)}
+                            className="px-4 py-2 bg-[#181614] hover:bg-[#8c562e] text-white text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                            title="Download Tax Invoice PDF"
+                          >
+                            <Download className="w-3.5 h-3.5 text-[#d4af37]" />
+                            <span>{downloadingOrderId === latestOrder.id ? 'Generating...' : 'Download Invoice'}</span>
+                          </motion.button>
 
-                      <button
-                        onClick={(e) => handleOpenPreview(latestOrder, e)}
-                        className="p-2 text-gray-500 hover:text-black hover:bg-gray-100 rounded-xs transition-colors cursor-pointer border border-[#ded5c7]"
-                        title="Preview Invoice"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </button>
+                          <button
+                            onClick={(e) => handleOpenPreview(latestOrder, e)}
+                            className="p-2 text-gray-500 hover:text-black hover:bg-gray-100 rounded-xs transition-colors cursor-pointer border border-[#ded5c7]"
+                            title="Preview Invoice"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -1002,11 +1039,22 @@ export const AccountScreen: React.FC = () => {
                                         Monogram: [{item.monogram}] • {item.foilColor || 'Gold'} Foil
                                       </div>
                                     )}
-                                    {getExistingReturnForProduct(order, item) && (
+                                    {getExistingReturnForProduct(order, item) ? (
                                       <p className="text-xs font-medium text-[#8c562e] flex items-center gap-1.5 mt-2 bg-[#fcfaf7] px-2.5 py-1 border border-[#d4af37]/40 rounded-xs w-fit">
                                         <RotateCcw className="w-3.5 h-3.5 text-[#8c562e] shrink-0" />
-                                        <span>Return requested for this product.</span>
+                                        <span>Return already requested for this product.</span>
                                       </p>
+                                    ) : (
+                                      isOrderReturnable(order).eligible && order.items && order.items.length > 1 && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => handleOpenReturnModal(order, item, e)}
+                                          className="text-xs font-semibold text-[#8c562e] hover:text-[#6a3f20] flex items-center gap-1 mt-2 underline cursor-pointer"
+                                        >
+                                          <RotateCcw className="w-3.5 h-3.5 text-[#8c562e]" />
+                                          <span>Request Return</span>
+                                        </button>
+                                      )
                                     )}
                                   </div>
                                 </div>
@@ -1049,16 +1097,19 @@ export const AccountScreen: React.FC = () => {
                             )}
 
                             {isOrderReturnable(order).eligible && (
-                              getExistingReturnForProduct(order) ? (
+                              areAllOrderItemsReturned(order) ? (
                                 <p className="text-xs font-medium text-[#8c562e] flex items-center gap-1.5 px-3 py-2 bg-[#fcfaf7] border border-[#d4af37]/70 rounded-xs shadow-2xs">
                                   <RotateCcw className="w-3.5 h-3.5 text-[#8c562e] shrink-0" />
-                                  <span>Return requested for this product.</span>
+                                  <span>Return already requested for this product.</span>
                                 </p>
                               ) : (
                                 <motion.button
                                   whileHover={{ scale: 1.02 }}
                                   whileTap={{ scale: 0.98 }}
-                                  onClick={(e) => handleOpenReturnModal(order, undefined, e)}
+                                  onClick={(e) => {
+                                    const firstUnreturned = order.items?.find(it => !getExistingReturnForProduct(order, it)) || order.items?.[0];
+                                    handleOpenReturnModal(order, firstUnreturned, e);
+                                  }}
                                   className="px-3.5 py-2 bg-[#fcfaf7] hover:bg-[#f6f0e4] text-[#8c562e] border border-[#d4af37]/70 hover:border-[#8c562e] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
                                   title="Request Return & Refund (Within 7 Days of Delivery)"
                                 >
@@ -1078,26 +1129,30 @@ export const AccountScreen: React.FC = () => {
                               <span>Track Consignment</span>
                             </motion.button>
 
-                            <motion.button
-                              id={`download-invoice-btn-${cleanId}`}
-                              whileHover={{ scale: 1.02 }}
-                              whileTap={{ scale: 0.98 }}
-                              disabled={isDownloadingThis}
-                              onClick={(e) => handleDownloadInvoice(order, e)}
-                              className="px-4 py-2 bg-white border border-[#181614] hover:bg-[#f6f2ea] text-[#181614] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                              title="Download official Tax Invoice PDF"
-                            >
-                              <Download className="w-3.5 h-3.5 text-[#8c562e]" />
-                              <span>{isDownloadingThis ? 'Generating...' : 'Download Invoice'}</span>
-                            </motion.button>
+                            {order.fulfillmentStatus === 'DELIVERED' && (
+                              <>
+                                <motion.button
+                                  id={`download-invoice-btn-${cleanId}`}
+                                  whileHover={{ scale: 1.02 }}
+                                  whileTap={{ scale: 0.98 }}
+                                  disabled={isDownloadingThis}
+                                  onClick={(e) => handleDownloadInvoice(order, e)}
+                                  className="px-4 py-2 bg-white border border-[#181614] hover:bg-[#f6f2ea] text-[#181614] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                                  title="Download official Tax Invoice PDF"
+                                >
+                                  <Download className="w-3.5 h-3.5 text-[#8c562e]" />
+                                  <span>{isDownloadingThis ? 'Generating...' : 'Download Invoice'}</span>
+                                </motion.button>
 
-                            <button
-                              onClick={(e) => handleOpenPreview(order, e)}
-                              className="p-2 text-gray-500 hover:text-black hover:bg-gray-200/60 rounded-xs transition-colors cursor-pointer"
-                              title="Preview Invoice Modal"
-                            >
-                              <Eye className="w-4 h-4" />
-                            </button>
+                                <button
+                                  onClick={(e) => handleOpenPreview(order, e)}
+                                  className="p-2 text-gray-500 hover:text-black hover:bg-gray-200/60 rounded-xs transition-colors cursor-pointer"
+                                  title="Preview Invoice Modal"
+                                >
+                                  <Eye className="w-4 h-4" />
+                                </button>
+                              </>
+                            )}
                           </div>
                         </div>
 
@@ -1407,14 +1462,16 @@ export const AccountScreen: React.FC = () => {
                 {/* Modal Footer */}
                 <div className="bg-[#f6f2ea] px-6 py-4 border-t border-[#ded5c7] flex flex-wrap justify-between items-center gap-3">
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={(e) => handleDownloadInvoice(trackingModalOrder, e)}
-                      disabled={downloadingOrderId === trackingModalOrder.id}
-                      className="px-4 py-2 bg-white border border-[#181614] hover:bg-[#181614] hover:text-white text-[#181614] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Download Invoice</span>
-                    </button>
+                    {trackingModalOrder.fulfillmentStatus === 'DELIVERED' && (
+                      <button
+                        onClick={(e) => handleDownloadInvoice(trackingModalOrder, e)}
+                        disabled={downloadingOrderId === trackingModalOrder.id}
+                        className="px-4 py-2 bg-white border border-[#181614] hover:bg-[#181614] hover:text-white text-[#181614] text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Download Invoice</span>
+                      </button>
+                    )}
 
                     {isOrderCancellable(trackingModalOrder.fulfillmentStatus) && (
                       <button

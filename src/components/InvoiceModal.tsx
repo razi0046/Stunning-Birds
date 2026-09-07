@@ -64,6 +64,11 @@ export const InvoiceModal: React.FC<Props> = ({
       return;
     }
 
+    if (order.fulfillmentStatus !== 'DELIVERED') {
+      showToast('Invoice is available for download once your order has been delivered.');
+      return;
+    }
+
     try {
       setIsDownloading(true);
       await generateAndDownloadInvoicePDF(order, products, currentUser, ATELIER_STORE_CONFIG);
@@ -116,16 +121,18 @@ export const InvoiceModal: React.FC<Props> = ({
                 <span>Print</span>
               </button>
 
-              <button
-                id="modal-download-invoice-btn"
-                onClick={handleDownload}
-                disabled={isDownloading || !isAllowed}
-                className="flex items-center space-x-1 sm:space-x-1.5 px-2.5 sm:px-4 py-1.5 bg-[#8c562e] hover:bg-[#734320] text-white text-[11px] sm:text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-xs disabled:opacity-50 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span className="hidden xs:inline sm:inline">{isDownloading ? 'Generating...' : 'Download PDF'}</span>
-                <span className="inline xs:hidden sm:hidden">{isDownloading ? 'PDF...' : 'PDF'}</span>
-              </button>
+              {order.fulfillmentStatus === 'DELIVERED' && (
+                <button
+                  id="modal-download-invoice-btn"
+                  onClick={handleDownload}
+                  disabled={isDownloading || !isAllowed}
+                  className="flex items-center space-x-1 sm:space-x-1.5 px-2.5 sm:px-4 py-1.5 bg-[#8c562e] hover:bg-[#734320] text-white text-[11px] sm:text-xs font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-xs disabled:opacity-50 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span className="hidden xs:inline sm:inline">{isDownloading ? 'Generating...' : 'Download PDF'}</span>
+                  <span className="inline xs:hidden sm:hidden">{isDownloading ? 'PDF...' : 'PDF'}</span>
+                </button>
+              )}
 
               <button
                 onClick={onClose}
@@ -427,14 +434,16 @@ export const InvoiceModal: React.FC<Props> = ({
               >
                 Close
               </button>
-              <button
-                onClick={handleDownload}
-                disabled={isDownloading || !isAllowed}
-                className="flex-1 sm:flex-initial px-4 sm:px-5 py-2 bg-[#8c562e] hover:bg-[#734320] text-white font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-sm disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer text-xs"
-              >
-                <Download className="w-4 h-4" />
-                <span>{isDownloading ? 'Downloading...' : 'Download Invoice PDF'}</span>
-              </button>
+              {order.fulfillmentStatus === 'DELIVERED' && (
+                <button
+                  onClick={handleDownload}
+                  disabled={isDownloading || !isAllowed}
+                  className="flex-1 sm:flex-initial px-4 sm:px-5 py-2 bg-[#8c562e] hover:bg-[#734320] text-white font-semibold uppercase tracking-wider rounded-xs transition-colors shadow-sm disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer text-xs"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{isDownloading ? 'Downloading...' : 'Download Invoice PDF'}</span>
+                </button>
+              )}
             </div>
           </div>
         </motion.div>

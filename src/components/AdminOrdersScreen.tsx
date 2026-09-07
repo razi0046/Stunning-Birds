@@ -56,6 +56,7 @@ export const AdminOrdersScreen: React.FC = () => {
     setCurrentScreen, 
     exportOrdersCSV, 
     refetchOrders,
+    pendingReturnsCount,
     products, 
     logout,
     showToast 
@@ -403,6 +404,14 @@ export const AdminOrdersScreen: React.FC = () => {
                 <RotateCcw className={`w-4 h-4 ${adminView === 'returns' ? 'text-[#d4af37]' : ''}`} />
                 <span>Returns & Refunds</span>
               </div>
+              {pendingReturnsCount > 0 && (
+                <span 
+                  id="admin-orders-returns-badge"
+                  className="px-2 py-0.5 rounded-full bg-[#8c562e] text-[10px] text-white font-bold"
+                >
+                  {pendingReturnsCount}
+                </span>
+              )}
             </button>
 
             <button

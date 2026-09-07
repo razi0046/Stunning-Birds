@@ -131,6 +131,7 @@ export const AdminReturnsManagement: React.FC<AdminReturnsManagementProps> = ({ 
         throw new Error(data.error || 'Failed to load return requests');
       }
       setReturns(data.returns || []);
+      window.dispatchEvent(new CustomEvent('returns-updated'));
     } catch (err: any) {
       console.error('Error fetching admin returns:', err);
       setError(err?.message || 'Failed to fetch returns.');
@@ -168,6 +169,7 @@ export const AdminReturnsManagement: React.FC<AdminReturnsManagementProps> = ({ 
       if (!res.ok || !data.success) throw new Error(data.error || 'Failed to approve return');
       setApprovingItem(null);
       await fetchReturns();
+      window.dispatchEvent(new CustomEvent('returns-updated'));
     } catch (err: any) {
       setActionError(err?.message || 'Approval failed');
     } finally {
@@ -201,6 +203,7 @@ export const AdminReturnsManagement: React.FC<AdminReturnsManagementProps> = ({ 
       setRejectingItem(null);
       setRejectionReason('');
       await fetchReturns();
+      window.dispatchEvent(new CustomEvent('returns-updated'));
     } catch (err: any) {
       setActionError(err?.message || 'Rejection failed');
     } finally {

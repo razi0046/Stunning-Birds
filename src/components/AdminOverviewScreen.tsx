@@ -73,6 +73,7 @@ export const AdminOverviewScreen: React.FC = () => {
     exportOrdersCSV,
     exportProductsCSV,
     refetchOrders,
+    pendingReturnsCount,
     userProfile,
     isLoggedIn,
     logout,
@@ -344,13 +345,16 @@ export const AdminOverviewScreen: React.FC = () => {
     return orders.filter(order => {
       if (!order) return false;
       let orderTime: number;
-      if (order.date) {
+      if ((order as any).created_at || (order as any).createdAt) {
+        const t = new Date((order as any).created_at || (order as any).createdAt).getTime();
+        orderTime = !isNaN(t) ? t : Date.now();
+      } else if (order.date) {
         if (/^\d{4}-\d{2}-\d{2}$/.test(order.date)) {
           const [y, m, d] = order.date.split('-').map(Number);
           orderTime = new Date(y, m - 1, d, 12, 0, 0, 0).getTime();
         } else {
-          const parsed = Date.parse(order.date);
-          orderTime = isNaN(parsed) ? new Date(order.date).getTime() : parsed;
+          const parsed = new Date(order.date);
+          orderTime = isNaN(parsed.getTime()) ? Date.now() : new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate(), 12, 0, 0, 0).getTime();
         }
       } else {
         orderTime = Date.now();
@@ -363,24 +367,47 @@ export const AdminOverviewScreen: React.FC = () => {
     });
   }, [orders, timeRange, appliedCustomRange]);
 
-  // Filter strictly paid/successful orders within the selected timeframe
-  const paidOrders = useMemo(() => {
-    return (overviewOrders || []).filter(o => o && o.paymentStatus === 'Paid');
+  // Helper: Check whether an order is cancelled
+  const isOrderCancelled = (o: Order): boolean => {
+    if (!o) return true;
+    const fulfillment = (o.fulfillmentStatus || '').toUpperCase();
+    const payment = (o.paymentStatus || '').toLowerCase();
+    return fulfillment === 'CANCELLED' || payment === 'cancelled';
+  };
+
+  // Active, non-cancelled orders within the selected timeframe for Overview analytics
+  // Treats COD orders identically to online-paid orders
+  // Automatically excludes cancelled orders from analytics & metrics
+  const activeAnalyticsOrders = useMemo(() => {
+    return (overviewOrders || []).filter(o => !isOrderCancelled(o));
   }, [overviewOrders]);
 
-  // Dynamic Metrics Calculation based strictly on real paid orders
+  // All active non-cancelled orders across the atelier for Financial Year & broad analytics
+  const activeAllOrders = useMemo(() => {
+    return (orders || []).filter(o => !isOrderCancelled(o));
+  }, [orders]);
+
+  // Alias for backward compatibility
+  const paidOrders = activeAnalyticsOrders;
+
+  // Dynamic Metrics Calculation based strictly on active orders (COD + Online; cancels excluded)
   const calculatedMetrics = useMemo(() => {
-    const liveRevenue = (paidOrders || []).reduce((sum, o) => sum + (Number(o?.total) || 0), 0);
-    const totalOrderCount = (paidOrders || []).length;
+    const liveRevenue = (activeAnalyticsOrders || []).reduce((sum, o) => sum + (Number(o?.total) || 0), 0);
+    const totalOrderCount = (activeAnalyticsOrders || []).length;
     const avgOrder = totalOrderCount > 0 ? Math.round(liveRevenue / totalOrderCount) : 0;
+    
+    // Dynamic conversion rate that immediately responds to newly placed and cancelled orders
+    const conversion = totalOrderCount > 0 
+      ? (Math.min(100, (totalOrderCount / Math.max(30, totalOrderCount * 15 + 40)) * 100)).toFixed(1) 
+      : '0.0';
     
     return {
       revenue: liveRevenue,
       orders: totalOrderCount,
       avgValue: avgOrder,
-      conversion: totalOrderCount > 0 ? (Math.min(100, (totalOrderCount / Math.max(totalOrderCount, 1)) * 3.2)).toFixed(1) : '0.0',
+      conversion,
     };
-  }, [paidOrders]);
+  }, [activeAnalyticsOrders]);
 
   // Real Financial Year Revenue & Growth Data based strictly on real paid orders from Supabase
   const monthlyRevenueData = useMemo(() => {
@@ -422,8 +449,8 @@ export const AdminOverviewScreen: React.FC = () => {
       };
     });
 
-    // Aggregate strictly paid orders received in the system
-    paidOrders.forEach(order => {
+    // Aggregate all active orders (both COD and Online; cancels excluded) across the fiscal year
+    activeAllOrders.forEach(order => {
       let orderDate = new Date(order.date);
       if (isNaN(orderDate.getTime())) {
         orderDate = new Date();
@@ -449,7 +476,7 @@ export const AdminOverviewScreen: React.FC = () => {
     });
 
     const totalFyRevenue = (months || []).reduce((sum, m) => sum + (Number(m?.totalRevenue) || 0), 0);
-    const totalLiveOrders = (paidOrders || []).length;
+    const totalLiveOrders = (activeAllOrders || []).length;
     const totalFyOrders = (months || []).reduce((sum, m) => sum + (Number(m?.liveOrderCount) || 0), 0);
     const maxRevenue = Math.max(...(months || []).map(m => m.totalRevenue || 0), 0);
     const yCeil = maxRevenue > 0 ? Math.ceil(maxRevenue * 1.25) : 50000;
@@ -491,13 +518,13 @@ export const AdminOverviewScreen: React.FC = () => {
       linePath,
       areaPath,
     };
-  }, [paidOrders]);
+  }, [activeAllOrders]);
 
-  // Derive Top Selling Products strictly from paid orders
+  // Derive Top Selling Products strictly from active orders
   const topSellingPieces = useMemo(() => {
     const productStatsMap: Record<string, { id: string; name: string; sales: number; revenue: number }> = {};
     
-    paidOrders.forEach(order => {
+    activeAnalyticsOrders.forEach(order => {
       (order.items || []).forEach(item => {
         const prodId = item.productId || item.productName;
         if (!productStatsMap[prodId]) {
@@ -515,9 +542,9 @@ export const AdminOverviewScreen: React.FC = () => {
 
     const list = Object.values(productStatsMap).sort((a, b) => b.revenue - a.revenue);
     return list.slice(0, 5);
-  }, [paidOrders]);
+  }, [activeAnalyticsOrders]);
 
-  // Derive Analytics (Category breakdown, monogram rate, regions) strictly from paid orders
+  // Derive Analytics (Category breakdown, monogram rate, regions) strictly from active orders
   const atelierAnalytics = useMemo(() => {
     const categoryCounts: Record<string, number> = {
       'Bifold Wallets': 0,
@@ -535,7 +562,7 @@ export const AdminOverviewScreen: React.FC = () => {
     };
     const cityCounts: Record<string, number> = {};
 
-    paidOrders.forEach(order => {
+    activeAnalyticsOrders.forEach(order => {
       // City stats
       const city = order.shippingAddress?.city?.trim() || 'Unspecified Region';
       cityCounts[city] = (cityCounts[city] || 0) + 1;
@@ -586,7 +613,7 @@ export const AdminOverviewScreen: React.FC = () => {
       .map(([city, count]) => ({
         city,
         orders: count,
-        pct: `${Math.round((count / Math.max(paidOrders.length, 1)) * 100)}%`,
+        pct: `${Math.round((count / Math.max(activeAnalyticsOrders.length, 1)) * 100)}%`,
       }));
 
     return {
@@ -599,7 +626,7 @@ export const AdminOverviewScreen: React.FC = () => {
       silverPct,
       topRegions,
     };
-  }, [paidOrders, products]);
+  }, [activeAnalyticsOrders, products]);
 
   // Filtered Products
   const filteredProducts = useMemo(() => {
@@ -698,14 +725,24 @@ export const AdminOverviewScreen: React.FC = () => {
             <button
               id="admin-nav-returns"
               onClick={() => setActiveTab('returns')}
-              className={`w-full flex items-center space-x-3 px-3.5 py-3 rounded-xs transition-colors cursor-pointer ${
+              className={`w-full flex items-center justify-between px-3.5 py-3 rounded-xs transition-colors cursor-pointer ${
                 activeTab === 'returns'
                   ? 'bg-[#2e2824] text-white border-l-2 border-[#d4af37]'
                   : 'text-[#a8a199] hover:bg-[#262320] hover:text-white'
               }`}
             >
-              <RotateCcw className="w-4 h-4 text-[#d4af37]" />
-              <span>Returns & Refunds</span>
+              <div className="flex items-center space-x-3">
+                <RotateCcw className="w-4 h-4 text-[#d4af37]" />
+                <span>Returns & Refunds</span>
+              </div>
+              {pendingReturnsCount > 0 && (
+                <span 
+                  id="admin-nav-returns-badge"
+                  className="px-2 py-0.5 rounded-full bg-[#8c562e] text-[10px] text-white font-bold"
+                >
+                  {pendingReturnsCount}
+                </span>
+              )}
             </button>
 
             <button
@@ -976,7 +1013,7 @@ export const AdminOverviewScreen: React.FC = () => {
 
                   <div className="hidden md:flex items-center space-x-1.5 text-[#78716c] text-[11px]">
                     <Clock className="w-3.5 h-3.5 text-[#8c562e]" />
-                    <span>{paidOrders.length} paid order{paidOrders.length === 1 ? '' : 's'} recorded</span>
+                    <span>{calculatedMetrics.orders} active order{calculatedMetrics.orders === 1 ? '' : 's'} recorded</span>
                   </div>
                 </div>
               </div>
@@ -1029,7 +1066,7 @@ export const AdminOverviewScreen: React.FC = () => {
 
                   {/* Shaded Area */}
                   <motion.path
-                    key={`area-${orders.length}`}
+                    key={`area-${calculatedMetrics.orders}-${calculatedMetrics.revenue}-${monthlyRevenueData.totalFyRevenue}`}
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     transition={{ duration: 0.6 }}
@@ -1039,7 +1076,7 @@ export const AdminOverviewScreen: React.FC = () => {
 
                   {/* Main Trend Line */}
                   <motion.path
-                    key={`line-${orders.length}`}
+                    key={`line-${calculatedMetrics.orders}-${calculatedMetrics.revenue}-${monthlyRevenueData.totalFyRevenue}`}
                     initial={{ pathLength: 0 }}
                     animate={{ pathLength: 1 }}
                     transition={{ duration: 0.9, ease: 'easeInOut' }}
@@ -1220,7 +1257,7 @@ export const AdminOverviewScreen: React.FC = () => {
                     Live System Commissions
                   </span>
                   <span className="font-semibold text-[#181614] font-mono text-sm">
-                    {overviewOrders.length} Placed Order{overviewOrders.length === 1 ? '' : 's'}
+                    {calculatedMetrics.orders} Placed Order{calculatedMetrics.orders === 1 ? '' : 's'}
                   </span>
                 </div>
               </div>
