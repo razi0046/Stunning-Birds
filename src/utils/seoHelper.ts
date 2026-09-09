@@ -1,35 +1,21 @@
 import { Product } from '../types';
 
+export const CANONICAL_DOMAIN = 'https://stunningbirds.in';
+
 /**
- * Returns the canonical base URL for the production site,
- * falling back gracefully in development or preview mode.
+ * Returns the canonical base URL for the production site:
+ * https://stunningbirds.in
  */
 export const getProductionBaseUrl = (): string => {
-  // If explicitly configured via environment variable
-  const envUrl = (import.meta as any).env?.VITE_SITE_URL;
-  if (envUrl && typeof envUrl === 'string' && envUrl.trim()) {
-    return envUrl.trim().replace(/\/+$/, '');
-  }
-
-  // If running in browser environment
-  if (typeof window !== 'undefined' && window.location?.origin) {
-    const origin = window.location.origin;
-    // For localhost or sandbox containers, use production domain for canonical SEO or current origin
-    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
-      return 'https://stunningbirds.com';
-    }
-    return origin.replace(/\/+$/, '');
-  }
-
-  return 'https://stunningbirds.com';
+  return CANONICAL_DOMAIN;
 };
 
 /**
- * Generates a clean, stable canonical URL for a specific product.
+ * Generates a clean, stable canonical HTTPS URL for a specific product.
  */
 export const getProductCanonicalUrl = (product: { slug?: string; id: string }): string => {
   const identifier = product.slug || product.id;
-  return `${getProductionBaseUrl()}/products/${encodeURIComponent(identifier)}`;
+  return `${CANONICAL_DOMAIN}/products/${encodeURIComponent(identifier)}`;
 };
 
 /**
@@ -65,7 +51,7 @@ const setCanonicalLink = (href: string) => {
 /**
  * Utility to inject or update JSON-LD structured script.
  */
-const setJsonLdScript = (id: string, data: Record<string, any>) => {
+export const setJsonLdScript = (id: string, data: Record<string, any>) => {
   if (typeof document === 'undefined') return;
 
   let script = document.getElementById(id) as HTMLScriptElement | null;
@@ -81,7 +67,7 @@ const setJsonLdScript = (id: string, data: Record<string, any>) => {
 /**
  * Utility to remove JSON-LD structured script by ID.
  */
-const removeJsonLdScript = (id: string) => {
+export const removeJsonLdScript = (id: string) => {
   if (typeof document === 'undefined') return;
   const script = document.getElementById(id);
   if (script && script.parentNode) {
@@ -102,14 +88,24 @@ export const getEffectiveProductSEO = (product: Product): {
   const customSeoTitle = (product.seoTitle || product.seo_title)?.trim();
   const customSeoDescription = (product.seoMetaDescription || product.seo_meta_description)?.trim();
 
-  const rawDesc = (product.description || '').replace(/\s+/g, ' ').trim();
-  const materialInfo = product.material ? `Handcrafted in ${product.material}.` : 'Handcrafted full-grain leather.';
-  const colorInfo = product.colorName ? `Available in ${product.colorName}.` : '';
+  const rawDesc = (product.description || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  const fallbackTitle = `${product.name} — Luxury Handcrafted ${product.category || 'Leather Goods'} | STUNNING BIRDS`;
-  const fallbackDesc = rawDesc.length >= 60
-    ? `${product.name}: ${rawDesc.slice(0, 140)}... Bespoke personalization & complimentary shipping.`
-    : `Discover ${product.name} — ${materialInfo} ${colorInfo} Bespoke monogramming & complimentary express courier nationwide.`;
+  const categoryName = product.category || 'Leather Goods';
+  const colorPart = product.colorName ? ` in ${product.colorName}` : '';
+  const fallbackTitle = `${product.name}${colorPart} | Luxury Handcrafted ${categoryName} | STUNNING BIRDS`;
+
+  let fallbackDesc = '';
+  if (rawDesc.length >= 60) {
+    fallbackDesc = rawDesc.length > 155 ? `${rawDesc.slice(0, 152)}...` : rawDesc;
+  } else if (rawDesc.length > 0) {
+    const extra = product.material ? ` Crafted from ${product.material}.` : '';
+    fallbackDesc = `${product.name}.${extra} ${rawDesc} Complimentary express courier across India.`;
+  } else {
+    fallbackDesc = `Shop the ${product.name}${colorPart} by STUNNING BIRDS. Premium full-grain handcrafted ${categoryName.toLowerCase()} with bespoke personalization.`;
+  }
 
   return {
     seoTitle: customSeoTitle || fallbackTitle,
@@ -120,72 +116,36 @@ export const getEffectiveProductSEO = (product: Product): {
 };
 
 /**
- * Applies dynamic SEO metadata for a single product page.
- * Uses real product fields from Supabase (title, description, price, category, images, reviews, custom SEO).
+ * Builds valid Schema.org Product structured data (JSON-LD) using actual existing product details.
  */
-export const applyProductSEO = (product: Product) => {
-  if (typeof document === 'undefined' || !product) return;
-
-  const canonicalUrl = getProductCanonicalUrl(product);
-  const primaryImage = product.images && product.images.length > 0
-    ? product.images[0]
-    : 'https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=1200&q=85';
-
+export const buildProductJsonLd = (product: Product, canonicalUrl: string): Record<string, any> => {
   const sellingPrice = product.sellingPrice || product.price || 0;
-  const rawDesc = (product.description || '').replace(/\s+/g, ' ').trim();
+  const rawDesc = (product.description || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  // Compute effective dynamic SEO title & meta description (prioritizing custom fields saved with product)
-  const { seoTitle: effectiveTitle, seoMetaDescription: effectiveDescription } = getEffectiveProductSEO(product);
+  const images: string[] = [];
+  if (Array.isArray(product.images) && product.images.length > 0) {
+    product.images.forEach(img => {
+      if (typeof img === 'string' && img.trim()) {
+        images.push(img.trim());
+      }
+    });
+  }
+  if (images.length === 0) {
+    images.push('https://arbfxnozydyodjkkgdoa.supabase.co/storage/v1/object/public/Assets/web-app-manifest-512x512.png');
+  }
 
-  // 1. Dynamic Page Title
-  document.title = effectiveTitle;
-
-  // 2. Dynamic Meta Description & Keywords
-  setMetaTag('name', 'description', effectiveDescription);
-  setMetaTag('name', 'keywords', `${product.name}, ${product.category}, luxury leather wallet, handcrafted wallet, vegetable tanned leather, bespoke monogram, ${product.colorName || 'leather'}`);
-  setMetaTag('name', 'author', 'STUNNING BIRDS Atelier');
-
-  // 3. Canonical URL
-  setCanonicalLink(canonicalUrl);
-
-  // 4. OpenGraph Metadata (Facebook, WhatsApp, LinkedIn, iMessage)
-  setMetaTag('property', 'og:title', effectiveTitle);
-  setMetaTag('property', 'og:description', effectiveDescription);
-  setMetaTag('property', 'og:image', primaryImage);
-  setMetaTag('property', 'og:image:alt', `${product.name} in ${product.colorName || 'handcrafted finish'}`);
-  setMetaTag('property', 'og:url', canonicalUrl);
-  setMetaTag('property', 'og:type', 'product');
-  setMetaTag('property', 'og:site_name', 'STUNNING BIRDS');
-  setMetaTag('property', 'product:price:amount', String(sellingPrice));
-  setMetaTag('property', 'product:price:currency', 'INR');
-  setMetaTag('property', 'product:availability', product.inStock !== false ? 'in stock' : 'out of stock');
-  setMetaTag('property', 'product:brand', 'STUNNING BIRDS');
-  setMetaTag('property', 'product:category', product.category || 'Leather Wallets');
-  setMetaTag('property', 'product:condition', 'new');
-
-  // 5. Twitter / X Card Metadata
-  setMetaTag('name', 'twitter:card', 'summary_large_image');
-  setMetaTag('name', 'twitter:title', effectiveTitle);
-  setMetaTag('name', 'twitter:description', effectiveDescription);
-  setMetaTag('name', 'twitter:image', primaryImage);
-  setMetaTag('name', 'twitter:image:alt', `${product.name} - Handcrafted luxury leather`);
-  setMetaTag('name', 'twitter:site', '@stunningbirds');
-
-  // 6. Schema.org Structured Data (JSON-LD)
-  const reviewsCount = product.reviews?.length || product.reviewsCount || 1;
-  const ratingValue = (product.rating || 5.0).toFixed(1);
+  const sku = product.sku || product.skuId;
+  const inStock = product.inStock !== false && (product.stockQuantity === undefined || product.stockQuantity > 0);
 
   const jsonLdData: Record<string, any> = {
     '@context': 'https://schema.org/',
     '@type': 'Product',
-    'name': effectiveTitle,
-    'image': product.images && product.images.length > 0 ? product.images : [primaryImage],
-    'description': effectiveDescription || rawDesc || `Handcrafted ${product.category} crafted from ${product.material || 'fine leather'}.`,
-    'sku': product.sku || product.skuId || `SB-${product.id}`,
-    'mpn': product.sku || product.skuId || `SB-${product.id}`,
-    'category': product.category || 'Leather Goods',
-    'color': product.colorName,
-    'material': product.material,
+    'name': product.name,
+    'description': rawDesc || `${product.name} handcrafted by STUNNING BIRDS.`,
+    'image': images,
     'brand': {
       '@type': 'Brand',
       'name': 'STUNNING BIRDS'
@@ -195,29 +155,52 @@ export const applyProductSEO = (product: Product) => {
       'url': canonicalUrl,
       'priceCurrency': 'INR',
       'price': String(sellingPrice),
-      'priceValidUntil': '2027-12-31',
       'itemCondition': 'https://schema.org/NewCondition',
-      'availability': product.inStock !== false ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+      'availability': inStock ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
       'seller': {
         '@type': 'Organization',
         'name': 'STUNNING BIRDS'
       }
-    },
-    'aggregateRating': {
-      '@type': 'AggregateRating',
-      'ratingValue': ratingValue,
-      'reviewCount': String(reviewsCount),
-      'bestRating': '5',
-      'worstRating': '1'
     }
   };
 
-  if (product.reviews && product.reviews.length > 0) {
+  if (sku) {
+    jsonLdData['sku'] = sku;
+    jsonLdData['mpn'] = sku;
+  }
+
+  if (product.category) {
+    jsonLdData['category'] = product.category;
+  }
+
+  if (product.colorName) {
+    jsonLdData['color'] = product.colorName;
+  }
+
+  if (product.material) {
+    jsonLdData['material'] = product.material;
+  }
+
+  // AggregateRating from reviews if present
+  const hasReviewsCount = Boolean(product.reviewsCount && product.reviewsCount > 0);
+  const hasReviewsArray = Boolean(product.reviews && product.reviews.length > 0);
+  if (product.rating && (hasReviewsCount || hasReviewsArray)) {
+    const revCount = product.reviews?.length || product.reviewsCount || 1;
+    jsonLdData['aggregateRating'] = {
+      '@type': 'AggregateRating',
+      'ratingValue': Number(product.rating).toFixed(1),
+      'reviewCount': String(revCount),
+      'bestRating': '5',
+      'worstRating': '1'
+    };
+  }
+
+  if (Array.isArray(product.reviews) && product.reviews.length > 0) {
     jsonLdData['review'] = product.reviews.slice(0, 5).map(r => ({
       '@type': 'Review',
       'author': {
         '@type': 'Person',
-        'name': r.authorName || 'Patron'
+        'name': r.authorName || 'Verified Buyer'
       },
       'datePublished': r.date || new Date().toISOString().split('T')[0],
       'reviewRating': {
@@ -225,10 +208,69 @@ export const applyProductSEO = (product: Product) => {
         'ratingValue': String(r.rating || 5),
         'bestRating': '5'
       },
-      'reviewBody': r.comment || r.title || 'Exceptional leather quality and craftsmanship.'
+      'reviewBody': r.comment || r.title || 'Exceptional craftsmanship and leather quality.'
     }));
   }
 
+  return jsonLdData;
+};
+
+/**
+ * Applies dynamic SEO metadata for a single public product page.
+ * Updates <title>, <meta name="description">, <link rel="canonical">,
+ * og:title, og:description, og:url, og:image, twitter:title, twitter:description,
+ * twitter:url, twitter:image, and Schema.org Product structured data.
+ */
+export const applyProductSEO = (product: Product) => {
+  if (typeof document === 'undefined' || !product) return;
+
+  const canonicalUrl = getProductCanonicalUrl(product);
+  const primaryImage = product.images && product.images.length > 0
+    ? product.images[0]
+    : 'https://arbfxnozydyodjkkgdoa.supabase.co/storage/v1/object/public/Assets/web-app-manifest-512x512.png';
+
+  const sellingPrice = product.sellingPrice || product.price || 0;
+
+  // Compute effective dynamic SEO title & meta description
+  const { seoTitle: effectiveTitle, seoMetaDescription: effectiveDescription } = getEffectiveProductSEO(product);
+
+  // 1. Dynamic Page Title
+  document.title = effectiveTitle;
+
+  // 2. Dynamic Meta Description
+  setMetaTag('name', 'description', effectiveDescription);
+  setMetaTag('name', 'keywords', `${product.name}, ${product.category || 'leather goods'}, luxury leather wallet, handcrafted wallet, vegetable tanned leather, bespoke monogram, ${product.colorName || 'leather'}`);
+  setMetaTag('name', 'author', 'STUNNING BIRDS Atelier');
+
+  // 3. Canonical URL
+  setCanonicalLink(canonicalUrl);
+
+  // 4. OpenGraph Metadata
+  setMetaTag('property', 'og:title', effectiveTitle);
+  setMetaTag('property', 'og:description', effectiveDescription);
+  setMetaTag('property', 'og:url', canonicalUrl);
+  setMetaTag('property', 'og:image', primaryImage);
+  setMetaTag('property', 'og:image:alt', `${product.name} in ${product.colorName || 'handcrafted finish'}`);
+  setMetaTag('property', 'og:type', 'product');
+  setMetaTag('property', 'og:site_name', 'STUNNING BIRDS');
+  setMetaTag('property', 'product:price:amount', String(sellingPrice));
+  setMetaTag('property', 'product:price:currency', 'INR');
+  setMetaTag('property', 'product:availability', product.inStock !== false ? 'in stock' : 'out of stock');
+  setMetaTag('property', 'product:brand', 'STUNNING BIRDS');
+  if (product.category) {
+    setMetaTag('property', 'product:category', product.category);
+  }
+
+  // 5. Twitter / X Card Metadata
+  setMetaTag('name', 'twitter:card', 'summary_large_image');
+  setMetaTag('name', 'twitter:title', effectiveTitle);
+  setMetaTag('name', 'twitter:description', effectiveDescription);
+  setMetaTag('name', 'twitter:url', canonicalUrl);
+  setMetaTag('name', 'twitter:image', primaryImage);
+  setMetaTag('name', 'twitter:image:alt', `${product.name} - Handcrafted luxury leather`);
+
+  // 6. Schema.org Product Structured Data (JSON-LD)
+  const jsonLdData = buildProductJsonLd(product, canonicalUrl);
   setJsonLdScript('product-schema-ldjson', jsonLdData);
 };
 
@@ -238,29 +280,29 @@ export const applyProductSEO = (product: Product) => {
 export const resetDefaultSEO = (screenName = 'home', categoryFilter?: string) => {
   if (typeof document === 'undefined') return;
 
-  const baseUrl = getProductionBaseUrl();
-  let title = 'STUNNING BIRDS — Modern Luxury Leather Goods';
-  let description = 'Handcrafted full-grain leather goods, designed for quiet moments and long journeys. Bespoke monogramming & complimentary nationwide express courier.';
+  const baseUrl = CANONICAL_DOMAIN;
+  let title = 'STUNNING BIRDS | Luxury Leather Goods & Accessories';
+  let description = 'Explore STUNNING BIRDS, a leather atelier offering premium bags, wallets, and accessories crafted with timeless style and exceptional attention to detail.';
   let canonical = `${baseUrl}/`;
 
   if (screenName === 'shop') {
     if (categoryFilter && categoryFilter !== 'All') {
-      title = `${categoryFilter} Collection — Luxury Handcrafted Leather | STUNNING BIRDS`;
-      description = `Explore our bespoke ${categoryFilter.toLowerCase()} collection. Crafted from full-grain Tuscan leather with custom gold debossing.`;
-      canonical = `${baseUrl}/#/shop?category=${encodeURIComponent(categoryFilter)}`;
+      title = `${categoryFilter} Collection | STUNNING BIRDS`;
+      description = `Explore our bespoke ${categoryFilter.toLowerCase()} collection. Handcrafted luxury leather goods crafted with timeless style and exceptional attention to detail.`;
+      canonical = `${baseUrl}/shop`;
     } else {
       title = 'Handcrafted Leather Wallets & Goods Collection | STUNNING BIRDS';
-      description = 'Discover the complete STUNNING BIRDS collection of luxury bifold wallets, cardholders, travel organizers, and bespoke leather goods.';
-      canonical = `${baseUrl}/#/shop`;
+      description = 'Discover the complete STUNNING BIRDS collection of luxury bifold wallets, cardholders, and bespoke leather goods.';
+      canonical = `${baseUrl}/shop`;
     }
   } else if (screenName === 'account') {
     title = 'Patron Sanctuary — Account & Commission History | STUNNING BIRDS';
     description = 'Manage your bespoke commissions, saved delivery residences, and society rewards at STUNNING BIRDS Atelier.';
-    canonical = `${baseUrl}/#/account`;
+    canonical = `${baseUrl}/account`;
   } else if (screenName === 'checkout') {
     title = 'Secure Atelier Checkout | STUNNING BIRDS';
     description = 'Complete your bespoke leather commission with encrypted checkout, UPI, cards, and complimentary insured courier.';
-    canonical = `${baseUrl}/#/checkout`;
+    canonical = `${baseUrl}/checkout`;
   } else if (screenName === 'terms-and-conditions') {
     title = 'Terms & Conditions | STUNNING BIRDS';
     description = 'Terms & Conditions governing the use of STUNNING BIRDS online boutique, product sales, orders, and payment terms.';
@@ -284,7 +326,7 @@ export const resetDefaultSEO = (screenName = 'home', categoryFilter?: string) =>
   } else if (screenName === 'admin-overview' || screenName === 'admin-orders' || screenName === 'admin-login') {
     title = 'Commerce Manager & Atelier Dashboard | STUNNING BIRDS';
     description = 'Administrative portal for STUNNING BIRDS atelier operations, order fulfillment, and product catalog management.';
-    canonical = `${baseUrl}/#/admin`;
+    canonical = `${baseUrl}/admin-overview`;
   }
 
   document.title = title;
@@ -294,7 +336,7 @@ export const resetDefaultSEO = (screenName = 'home', categoryFilter?: string) =>
   // OpenGraph defaults
   setMetaTag('property', 'og:title', title);
   setMetaTag('property', 'og:description', description);
-  setMetaTag('property', 'og:image', 'https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=1200&q=85');
+  setMetaTag('property', 'og:image', 'https://arbfxnozydyodjkkgdoa.supabase.co/storage/v1/object/public/Assets/web-app-manifest-512x512.png');
   setMetaTag('property', 'og:url', canonical);
   setMetaTag('property', 'og:type', 'website');
   setMetaTag('property', 'og:site_name', 'STUNNING BIRDS');
@@ -303,8 +345,8 @@ export const resetDefaultSEO = (screenName = 'home', categoryFilter?: string) =>
   setMetaTag('name', 'twitter:card', 'summary_large_image');
   setMetaTag('name', 'twitter:title', title);
   setMetaTag('name', 'twitter:description', description);
-  setMetaTag('name', 'twitter:image', 'https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=1200&q=85');
-  setMetaTag('name', 'twitter:site', '@stunningbirds');
+  setMetaTag('name', 'twitter:url', canonical);
+  setMetaTag('name', 'twitter:image', 'https://arbfxnozydyodjkkgdoa.supabase.co/storage/v1/object/public/Assets/web-app-manifest-512x512.png');
 
   // Remove product JSON-LD script if left over
   removeJsonLdScript('product-schema-ldjson');

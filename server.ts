@@ -5,7 +5,11 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
 import helmet from 'helmet';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import rateLimit from 'express-rate-limit';
 import { createClient } from '@supabase/supabase-js';
 import { INITIAL_PRODUCTS, INITIAL_ORDERS, CURRENT_USER, ADMIN_METRICS } from './src/data/mockData';
@@ -4181,6 +4185,335 @@ async function startServer() {
       subscribers.push(email);
     }
     res.json({ success: true, message: 'Welcome to the Stunning Birds Journal.' });
+  });
+
+  // ================= DYNAMIC SEO & SITEMAP GENERATION =================
+  const CANONICAL_SITE_URL = 'https://stunningbirds.in';
+
+  const escapeHtmlAttr = (str: string): string => {
+    return (str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  };
+
+  const generateDynamicSitemapXml = async (): Promise<string> => {
+    // 1. Static public, indexable pages with HTTPS canonical URLs
+    const staticPages = [
+      { path: '/', priority: '1.0', changefreq: 'weekly' },
+      { path: '/shop', priority: '0.9', changefreq: 'daily' },
+      { path: '/terms-and-conditions', priority: '0.5', changefreq: 'monthly' },
+      { path: '/privacy-policy', priority: '0.5', changefreq: 'monthly' },
+      { path: '/shipping-policy', priority: '0.5', changefreq: 'monthly' },
+      { path: '/cancellation-and-refund', priority: '0.5', changefreq: 'monthly' },
+      { path: '/contact-us', priority: '0.6', changefreq: 'monthly' },
+    ];
+
+    const seenUrls = new Set<string>();
+    const productEntries: { loc: string; lastmod?: string; changefreq: string; priority: string }[] = [];
+
+    // 2. Fetch all public products from Supabase catalog
+    try {
+      const { data: dbProducts, error } = await supabase
+        .from('products')
+        .select('id, slug, updated_at, created_at')
+        .order('created_at', { ascending: false });
+
+      if (!error && dbProducts && dbProducts.length > 0) {
+        for (const p of dbProducts) {
+          const identifier = (p.slug || p.id || '').trim();
+          if (!identifier) continue;
+          const loc = `${CANONICAL_SITE_URL}/products/${encodeURIComponent(identifier)}`;
+          if (seenUrls.has(loc)) continue;
+          seenUrls.add(loc);
+
+          const rawDate = p.updated_at || p.created_at;
+          let lastmod: string | undefined;
+          if (rawDate) {
+            const parsed = new Date(rawDate);
+            if (!isNaN(parsed.getTime())) {
+              lastmod = parsed.toISOString().split('T')[0];
+            }
+          }
+
+          productEntries.push({
+            loc,
+            lastmod,
+            changefreq: 'weekly',
+            priority: '0.8',
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Error querying Supabase for dynamic sitemap:', err);
+    }
+
+    // 3. Fallback to local catalog if Supabase returned 0 items
+    if (productEntries.length === 0 && Array.isArray(products) && products.length > 0) {
+      for (const p of products) {
+        const identifier = (p.slug || p.id || '').trim();
+        if (!identifier) continue;
+        const loc = `${CANONICAL_SITE_URL}/products/${encodeURIComponent(identifier)}`;
+        if (seenUrls.has(loc)) continue;
+        seenUrls.add(loc);
+        productEntries.push({
+          loc,
+          changefreq: 'weekly',
+          priority: '0.8',
+        });
+      }
+    }
+
+    // 4. Construct XML string
+    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+    xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
+
+    for (const page of staticPages) {
+      const loc = `${CANONICAL_SITE_URL}${page.path}`;
+      xml += '  <url>\n';
+      xml += `    <loc>${loc}</loc>\n`;
+      xml += `    <changefreq>${page.changefreq}</changefreq>\n`;
+      xml += `    <priority>${page.priority}</priority>\n`;
+      xml += '  </url>\n';
+    }
+
+    for (const prod of productEntries) {
+      xml += '  <url>\n';
+      xml += `    <loc>${prod.loc}</loc>\n`;
+      if (prod.lastmod) {
+        xml += `    <lastmod>${prod.lastmod}</lastmod>\n`;
+      }
+      xml += `    <changefreq>${prod.changefreq}</changefreq>\n`;
+      xml += `    <priority>${prod.priority}</priority>\n`;
+      xml += '  </url>\n';
+    }
+
+    xml += '</urlset>\n';
+    return xml;
+  };
+
+  // Production-ready robots.txt handler
+  app.get('/robots.txt', (req, res) => {
+    const candidates = [
+      path.join(process.cwd(), 'public', 'robots.txt'),
+      path.join(process.cwd(), 'dist', 'robots.txt'),
+      path.join(__dirname, 'public', 'robots.txt'),
+      path.join(__dirname, 'dist', 'robots.txt'),
+    ];
+    const file = candidates.find(f => fs.existsSync(f));
+    if (file) {
+      res.type('text/plain; charset=utf-8').sendFile(file);
+    } else {
+      res.type('text/plain; charset=utf-8').send(
+        `User-agent: *\nAllow: /\n\nDisallow: /admin\nDisallow: /account\nDisallow: /checkout\nDisallow: /cart\nDisallow: /wishlist\nDisallow: /login\nDisallow: /order-success\nDisallow: /api/\n\nSitemap: https://stunningbirds.in/sitemap.xml\n`
+      );
+    }
+  });
+
+  // Production-ready dynamic sitemap.xml handler (includes all Supabase products automatically)
+  app.get('/sitemap.xml', async (req, res) => {
+    try {
+      const sitemap = await generateDynamicSitemapXml();
+
+      // Write sitemap to public/ and dist/ folders for file-based consistency
+      try {
+        const pubPath = path.join(process.cwd(), 'public', 'sitemap.xml');
+        fs.writeFileSync(pubPath, sitemap, 'utf8');
+        const distFolder = path.join(process.cwd(), 'dist');
+        if (fs.existsSync(distFolder)) {
+          fs.writeFileSync(path.join(distFolder, 'sitemap.xml'), sitemap, 'utf8');
+        }
+      } catch (writeErr) {
+        // Non-fatal if filesystem is read-only
+      }
+
+      res.type('application/xml; charset=utf-8').send(sitemap);
+    } catch (err) {
+      console.error('Error generating dynamic sitemap.xml:', err);
+      const candidates = [
+        path.join(process.cwd(), 'public', 'sitemap.xml'),
+        path.join(process.cwd(), 'dist', 'sitemap.xml'),
+      ];
+      const file = candidates.find(f => fs.existsSync(f));
+      if (file) {
+        res.type('application/xml; charset=utf-8').sendFile(file);
+      } else {
+        res.status(500).send('Error generating sitemap');
+      }
+    }
+  });
+
+  // Dynamic Product Page SEO Pre-Renderer for Crawlers and Direct Access
+  app.get('/products/:slugOrId', async (req, res, next) => {
+    const slugOrId = (req.params.slugOrId || '').trim();
+    if (!slugOrId) return next();
+
+    try {
+      let product: Product | null = null;
+
+      // 1. Fetch from Supabase
+      try {
+        const { data: dbProduct, error } = await supabase
+          .from('products')
+          .select('*, product_reviews(*)')
+          .or(`slug.eq.${slugOrId},id.eq.${slugOrId}`)
+          .maybeSingle();
+
+        if (!error && dbProduct) {
+          product = mapSupabaseProduct(dbProduct);
+        }
+      } catch (err) {
+        console.error('Error looking up product for SEO rendering:', err);
+      }
+
+      // 2. Fallback to local products array
+      if (!product) {
+        const local = products.find(p => p.slug === slugOrId || p.id === slugOrId);
+        if (local) product = local;
+      }
+
+      if (!product) {
+        return next();
+      }
+
+      // 3. Resolve index.html template
+      const htmlCandidates = [
+        path.join(process.cwd(), 'dist', 'index.html'),
+        path.join(__dirname, 'dist', 'index.html'),
+        path.join(process.cwd(), 'index.html'),
+        path.join(__dirname, 'index.html'),
+      ];
+      const templatePath = htmlCandidates.find(f => fs.existsSync(f));
+      if (!templatePath) {
+        return next();
+      }
+
+      let html = fs.readFileSync(templatePath, 'utf8');
+
+      // 4. Compute unique dynamic product metadata
+      const categoryName = product.category || 'Leather Goods';
+      const colorPart = product.colorName ? ` in ${product.colorName}` : '';
+      const rawDesc = (product.description || '')
+        .replace(/<[^>]*>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const customTitle = (product.seoTitle || product.seo_title)?.trim();
+      const customDesc = (product.seoMetaDescription || product.seo_meta_description)?.trim();
+
+      const pageTitle = customTitle || `${product.name}${colorPart} | Luxury Handcrafted ${categoryName} | STUNNING BIRDS`;
+      
+      let metaDesc = customDesc || '';
+      if (!metaDesc) {
+        if (rawDesc.length >= 60) {
+          metaDesc = rawDesc.length > 155 ? `${rawDesc.slice(0, 152)}...` : rawDesc;
+        } else if (rawDesc.length > 0) {
+          const extra = product.material ? ` Crafted from ${product.material}.` : '';
+          metaDesc = `${product.name}.${extra} ${rawDesc} Complimentary express courier across India.`;
+        } else {
+          metaDesc = `Shop the ${product.name}${colorPart} by STUNNING BIRDS. Premium full-grain handcrafted ${categoryName.toLowerCase()} with bespoke personalization.`;
+        }
+      }
+
+      const canonicalUrl = `${CANONICAL_SITE_URL}/products/${encodeURIComponent(product.slug || product.id)}`;
+      const primaryImage = product.images && product.images.length > 0
+        ? product.images[0]
+        : 'https://arbfxnozydyodjkkgdoa.supabase.co/storage/v1/object/public/Assets/web-app-manifest-512x512.png';
+
+      const sellingPrice = product.sellingPrice || product.price || 0;
+      const inStock = product.inStock !== false && (product.stockQuantity === undefined || product.stockQuantity > 0);
+
+      // 5. Build valid Schema.org Product structured data
+      const jsonLdData: Record<string, any> = {
+        '@context': 'https://schema.org/',
+        '@type': 'Product',
+        'name': product.name,
+        'description': rawDesc || `${product.name} handcrafted by STUNNING BIRDS.`,
+        'image': product.images && product.images.length > 0 ? product.images : [primaryImage],
+        'brand': {
+          '@type': 'Brand',
+          'name': 'STUNNING BIRDS',
+        },
+        'offers': {
+          '@type': 'Offer',
+          'url': canonicalUrl,
+          'priceCurrency': 'INR',
+          'price': String(sellingPrice),
+          'itemCondition': 'https://schema.org/NewCondition',
+          'availability': inStock ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+          'seller': {
+            '@type': 'Organization',
+            'name': 'STUNNING BIRDS',
+          },
+        },
+      };
+
+      if (product.sku || product.skuId) {
+        jsonLdData['sku'] = product.sku || product.skuId;
+        jsonLdData['mpn'] = product.sku || product.skuId;
+      }
+      if (product.category) jsonLdData['category'] = product.category;
+      if (product.colorName) jsonLdData['color'] = product.colorName;
+      if (product.material) jsonLdData['material'] = product.material;
+
+      if (product.rating && (product.reviewsCount || (product.reviews && product.reviews.length > 0))) {
+        const revCount = product.reviews?.length || product.reviewsCount || 1;
+        jsonLdData['aggregateRating'] = {
+          '@type': 'AggregateRating',
+          'ratingValue': Number(product.rating).toFixed(1),
+          'reviewCount': String(revCount),
+          'bestRating': '5',
+          'worstRating': '1',
+        };
+      }
+
+      if (Array.isArray(product.reviews) && product.reviews.length > 0) {
+        jsonLdData['review'] = product.reviews.slice(0, 5).map(r => ({
+          '@type': 'Review',
+          'author': {
+            '@type': 'Person',
+            'name': r.authorName || 'Verified Buyer',
+          },
+          'datePublished': r.date || new Date().toISOString().split('T')[0],
+          'reviewRating': {
+            '@type': 'Rating',
+            'ratingValue': String(r.rating || 5),
+            'bestRating': '5',
+          },
+          'reviewBody': r.comment || r.title || 'Exceptional craftsmanship and leather quality.',
+        }));
+      }
+
+      // 6. Replace head meta tags with dynamic product values
+      html = html.replace(/<title>.*?<\/title>/i, `<title>${escapeHtmlAttr(pageTitle)}</title>`);
+      html = html.replace(/<meta\s+name=["']description["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta name="description" content="${escapeHtmlAttr(metaDesc)}" />`);
+      html = html.replace(/<link\s+rel=["']canonical["']\s+href=["'][^"']*["']\s*\/?>/i, `<link rel="canonical" href="${canonicalUrl}" />`);
+      html = html.replace(/<meta\s+property=["']og:title["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta property="og:title" content="${escapeHtmlAttr(pageTitle)}" />`);
+      html = html.replace(/<meta\s+property=["']og:description["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta property="og:description" content="${escapeHtmlAttr(metaDesc)}" />`);
+      html = html.replace(/<meta\s+property=["']og:url["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta property="og:url" content="${canonicalUrl}" />`);
+      html = html.replace(/<meta\s+property=["']og:image["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta property="og:image" content="${primaryImage}" />`);
+      html = html.replace(/<meta\s+name=["']twitter:title["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta name="twitter:title" content="${escapeHtmlAttr(pageTitle)}" />`);
+      html = html.replace(/<meta\s+name=["']twitter:description["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta name="twitter:description" content="${escapeHtmlAttr(metaDesc)}" />`);
+      html = html.replace(/<meta\s+name=["']twitter:image["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta name="twitter:image" content="${primaryImage}" />`);
+
+      // Ensure twitter:url exists
+      if (!html.includes('twitter:url')) {
+        html = html.replace('</head>', `  <meta name="twitter:url" content="${canonicalUrl}" />\n</head>`);
+      } else {
+        html = html.replace(/<meta\s+name=["']twitter:url["']\s+content=["'][^"']*["']\s*\/?>/i, `<meta name="twitter:url" content="${canonicalUrl}" />`);
+      }
+
+      // Inject Schema.org JSON-LD before </head>
+      const jsonLdTag = `\n  <script type="application/ld+json" id="product-schema-ldjson">\n${JSON.stringify(jsonLdData, null, 2)}\n  </script>\n`;
+      html = html.replace('</head>', `${jsonLdTag}</head>`);
+
+      res.type('text/html; charset=utf-8').send(html);
+    } catch (err) {
+      console.error('Error handling product SEO route:', err);
+      next();
+    }
   });
 
   // Catch-all 404 for unhandled API routes (Ensures JSON response instead of HTML SPA fallback)
