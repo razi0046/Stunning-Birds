@@ -108,10 +108,16 @@ export const SearchModal: React.FC = () => {
                         <h4 className="font-serif-luxury text-sm font-semibold text-[#181614] group-hover:text-[#8c562e] transition-colors leading-tight">
                           {product.name}
                         </h4>
-                        <div className="flex items-center gap-1 text-xs text-[#78716c] mt-0.5">
-                          <Star className="w-3 h-3 fill-[#d4af37] text-[#d4af37]" />
-                          <span>{product.rating}</span>
-                        </div>
+                        {product.reviewsCount && product.reviewsCount > 0 && product.rating > 0 ? (
+                          <div className="flex items-center gap-1 text-xs text-[#78716c] mt-0.5">
+                            <Star className="w-3 h-3 fill-[#d4af37] text-[#d4af37]" />
+                            <span>{product.rating}</span>
+                          </div>
+                        ) : (
+                          <div className="text-[10px] text-[#a8a199] mt-0.5">
+                            No reviews yet
+                          </div>
+                        )}
                       </div>
                       <div className="flex items-center justify-between mt-2">
                         <div className="flex items-baseline gap-2">

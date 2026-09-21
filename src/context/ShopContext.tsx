@@ -197,8 +197,6 @@ const mapSupabaseProduct = (p: any): Product => {
     colorHex: p.color_hex || '#3a2012',
     material: p.material || 'Full-Grain Tuscan Leather',
     dimensions: p.dimensions || '',
-    rating: Number(p.rating) || 5.0,
-    reviewsCount: Number(p.reviews_count) || 0,
     badge: p.badge || undefined,
     inStock: p.in_stock !== false,
     stockQuantity: p.stock_quantity !== undefined ? Number(p.stock_quantity) : 50,
@@ -217,6 +215,17 @@ const mapSupabaseProduct = (p: any): Product => {
     seo_title: seoTitle,
     seoMetaDescription,
     seo_meta_description: seoMetaDescription,
+    rating: (() => {
+      const revs = Array.isArray(p.product_reviews) ? p.product_reviews : (Array.isArray(p.reviews) ? p.reviews : []);
+      if (revs.length > 0) {
+        return Number((revs.reduce((acc: number, r: any) => acc + (Number(r.rating) || 0), 0) / revs.length).toFixed(1));
+      }
+      return 0;
+    })(),
+    reviewsCount: (() => {
+      const revs = Array.isArray(p.product_reviews) ? p.product_reviews : (Array.isArray(p.reviews) ? p.reviews : []);
+      return revs.length;
+    })(),
     reviews: Array.isArray(p.product_reviews) ? p.product_reviews.map((r: any) => ({
       id: r.id,
       productId: r.product_id,
@@ -228,7 +237,7 @@ const mapSupabaseProduct = (p: any): Product => {
       comment: r.comment,
       date: r.date,
       verifiedPurchase: r.verified_purchase !== false,
-    })) : [],
+    })) : (Array.isArray(p.reviews) ? p.reviews : []),
   };
 };
 
@@ -1135,9 +1144,10 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const couponCode = orderData.couponCode || orderData.coupon_code || undefined;
     const discountPercentage = orderData.discountPercentage || (couponCode ? 10 : undefined);
     const shipping = orderData.shipping !== undefined ? orderData.shipping : 0; // Complimentary express courier
-    const taxableSubtotal = Math.max(0, subtotal - discountAmount);
-    const taxes = orderData.taxes !== undefined ? orderData.taxes : Math.round(taxableSubtotal * 0.18);
-    const total = orderData.total !== undefined ? orderData.total : (taxableSubtotal + shipping + taxes);
+    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+    // Product prices are GST/tax-inclusive. Tax is embedded in selling price at 18% GST:
+    const taxes = Math.round(discountedSubtotal - (discountedSubtotal / 1.18));
+    const total = discountedSubtotal + shipping;
 
     const orderNumber = Math.floor(1000 + Math.random() * 9000);
     const orderId = `#ORD-${orderNumber}`;
@@ -1374,9 +1384,10 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const couponCode = orderData.couponCode || orderData.coupon_code || undefined;
     const discountPercentage = orderData.discountPercentage || (couponCode ? 10 : undefined);
     const shipping = orderData.shipping !== undefined ? orderData.shipping : 0;
-    const taxableSubtotal = Math.max(0, subtotal - discountAmount);
-    const taxes = orderData.taxes !== undefined ? orderData.taxes : Math.round(taxableSubtotal * 0.18);
-    const total = orderData.total !== undefined ? orderData.total : (taxableSubtotal + shipping + taxes);
+    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+    // Product prices are GST/tax-inclusive. Tax is embedded in selling price at 18% GST:
+    const taxes = Math.round(discountedSubtotal - (discountedSubtotal / 1.18));
+    const total = discountedSubtotal + shipping;
 
     const orderNumber = Math.floor(1000 + Math.random() * 9000);
     const orderId = `#ORD-${orderNumber}`;
@@ -2029,8 +2040,9 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       colorHex: productData.colorHex || '#3a2012',
       material: productData.material || 'Full-Grain Tuscan Leather',
       dimensions: productData.dimensions || '',
-      rating: 5.0,
-      reviewsCount: 1,
+      rating: 0,
+      reviewsCount: 0,
+      reviews: [],
       badge: productData.badge || 'NEW',
       inStock: productData.inStock !== false,
       stockQuantity: productData.stockQuantity || 50,
@@ -2047,7 +2059,6 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
       seo_title: productData.seoTitle || productData.seo_title,
       seoMetaDescription: productData.seoMetaDescription || productData.seo_meta_description,
       seo_meta_description: productData.seoMetaDescription || productData.seo_meta_description,
-      reviews: [],
     };
 
     // Store SEO metadata locally for instant resilience
@@ -2617,9 +2628,8 @@ export const ShopProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (p.id === productId || p.slug === productId) {
           const currentReviews = p.reviews || [];
           const updatedReviews = [newReview, ...currentReviews];
-          const newCount = (p.reviewsCount || 0) + 1;
-          const currentRating = p.rating || 5;
-          const newAvg = Number(((currentRating * (p.reviewsCount || 1) + reviewData.rating) / newCount).toFixed(1));
+          const newCount = updatedReviews.length;
+          const newAvg = Number((updatedReviews.reduce((sum, r) => sum + (Number(r.rating) || 0), 0) / newCount).toFixed(1));
 
           const updatedProd: Product = {
             ...p,

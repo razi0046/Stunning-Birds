@@ -55,7 +55,7 @@ export const InvoiceModal: React.FC<Props> = ({
   const deliveryTax = deliveryCharge > 0 ? deliveryCharge - deliveryTaxable : 0;
   const totalTaxable = itemsTaxableSum + deliveryTaxable;
   const totalTax = itemsTaxSum + deliveryTax;
-  const grandTotal = Number(order.total) || (Number(order.subtotal) || 0) + deliveryCharge + totalTax;
+  const grandTotal = Number(order.total) || ((Number(order.subtotal) || 0) - (Number(order.discountAmount || (order as any).discount_amount) || 0) + deliveryCharge);
   const amountWords = convertAmountToWords(grandTotal);
 
   const handleDownload = async () => {

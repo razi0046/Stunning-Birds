@@ -113,15 +113,21 @@ const ShopProductCard: React.FC<ShopProductCardProps> = React.memo(({
 
         {/* Star Rating */}
         <div className="flex items-center gap-1 text-[10px] sm:text-[11px] text-[#78716c] pt-0.5 sm:pt-1">
-          <div className="flex items-center text-[#d4af37]">
-            {[...Array(5)].map((_, i) => (
-              <Star
-                key={i}
-                className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${i < Math.floor(product.rating) ? 'fill-[#d4af37]' : 'text-[#ded5c7]'}`}
-              />
-            ))}
-          </div>
-          <span className="text-[9px] sm:text-[10px]">({product.reviewsCount})</span>
+          {product.reviewsCount > 0 && product.rating > 0 ? (
+            <>
+              <div className="flex items-center text-[#d4af37]">
+                {[...Array(5)].map((_, i) => (
+                  <Star
+                    key={i}
+                    className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${i < Math.floor(product.rating) ? 'fill-[#d4af37]' : 'text-[#ded5c7]'}`}
+                  />
+                ))}
+              </div>
+              <span className="text-[9px] sm:text-[10px]">({product.reviewsCount})</span>
+            </>
+          ) : (
+            <span className="text-[9px] sm:text-[10px] text-[#a8a199]">No reviews yet</span>
+          )}
         </div>
       </div>
     </motion.div>

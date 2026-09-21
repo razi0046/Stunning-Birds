@@ -495,7 +495,7 @@ export async function generateAndDownloadInvoicePDF(
 
   const totalTaxable = itemsTaxableSum + deliveryTaxable;
   const grandGst = itemsTaxSum + deliveryTax;
-  const grandTotal = order.total || (order.subtotal + (order.taxes || 0) + (order.shipping || 0));
+  const grandTotal = order.total || ((order.subtotal || 0) - (order.discountAmount || (order as any).discount_amount || 0) + (order.shipping || 0));
 
   autoTable(doc, {
     startY: currentY,

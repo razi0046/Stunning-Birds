@@ -196,8 +196,6 @@ const mapSupabaseProduct = (p: any): Product => {
     colorHex: p.color_hex || '#3a2012',
     material: p.material || 'Full-Grain Vegetable Tanned Leather',
     dimensions: p.dimensions || '',
-    rating: Number(p.rating) || 5.0,
-    reviewsCount: Number(p.reviews_count) || 0,
     badge: p.badge || undefined,
     inStock: p.in_stock !== false,
     stockQuantity: p.stock_quantity !== undefined ? Number(p.stock_quantity) : 10,
@@ -214,6 +212,17 @@ const mapSupabaseProduct = (p: any): Product => {
     seo_title: p.seo_title || p.seoTitle || undefined,
     seoMetaDescription: p.seo_description || p.seo_meta_description || p.seoMetaDescription || undefined,
     seo_meta_description: p.seo_description || p.seo_meta_description || p.seoMetaDescription || undefined,
+    rating: (() => {
+      const revs = Array.isArray(p.product_reviews) ? p.product_reviews : (Array.isArray(p.reviews) ? p.reviews : []);
+      if (revs.length > 0) {
+        return Number((revs.reduce((acc: number, r: any) => acc + (Number(r.rating) || 0), 0) / revs.length).toFixed(1));
+      }
+      return 0;
+    })(),
+    reviewsCount: (() => {
+      const revs = Array.isArray(p.product_reviews) ? p.product_reviews : (Array.isArray(p.reviews) ? p.reviews : []);
+      return revs.length;
+    })(),
     reviews: Array.isArray(p.product_reviews) ? p.product_reviews.map((r: any) => ({
       id: r.id,
       authorName: r.author_name,
@@ -223,7 +232,7 @@ const mapSupabaseProduct = (p: any): Product => {
       comment: r.comment,
       date: r.date,
       verifiedPurchase: r.verified_purchase !== false,
-    })) : [],
+    })) : (Array.isArray(p.reviews) ? p.reviews : []),
   };
 };
 
@@ -669,71 +678,145 @@ async function startServer() {
     })
   );
 
-  // 2. Rate Limiters for Sensitive API Endpoints
-  const globalApiLimiter = rateLimit({
+  // ==============================================================================
+  // 2. PRODUCTION-SAFE SERVER-SIDE RATE LIMITERS
+  // ==============================================================================
+
+  // Helper to extract, normalize, and sanitize client IP address
+  // Normalizes IPv6-mapped IPv4 addresses and prevents header spoofing through Express trust proxy
+  const getClientIp = (req: express.Request): string => {
+    let ip = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+    if (typeof ip === 'string' && ip.startsWith('::ffff:')) {
+      ip = ip.substring(7);
+    }
+    return ip;
+  };
+
+  // Factory to create production-safe rate limiters with standard HTTP 429 JSON response & Retry-After headers
+  const createRateLimiter = (options: {
+    windowMs: number;
+    limit: number;
+    message: string;
+    extraFields?: Record<string, any>;
+    skip?: (req: express.Request, res: express.Response) => boolean;
+  }) => {
+    return rateLimit({
+      windowMs: options.windowMs,
+      limit: options.limit,
+      standardHeaders: true,
+      legacyHeaders: false,
+      passOnStoreError: true, // Fail safely: if in-memory store experiences pressure, traffic is not blocked
+      validate: false, // Suppress console warning noise in serverless / containerized environments
+      keyGenerator: (req) => getClientIp(req),
+      skip: options.skip || ((req) => req.method === 'OPTIONS'),
+      handler: (req, res, _next, limiterOpts) => {
+        const retryAfterSeconds = Math.ceil((limiterOpts.windowMs || options.windowMs) / 1000);
+        res.setHeader('Retry-After', String(retryAfterSeconds));
+        res.status(429).json({
+          success: false,
+          error: 'Too Many Requests',
+          message: options.message,
+          statusCode: 429,
+          retryAfter: retryAfterSeconds,
+          ...(options.extraFields || {}),
+        });
+      },
+    });
+  };
+
+  // 1. Global API Limiter: Generous threshold across all /api/ endpoints for catalog browsing and synchronization
+  // Normal HTML page requests, static files (/assets/*), robots.txt, and sitemap.xml are completely exempt
+  const globalApiLimiter = createRateLimiter({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 500, // Generous limit for product catalog browsing, image loading & API sync
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: false,
-    message: { error: 'Too many requests. Please slow down and try again after a few minutes.' },
+    limit: 600, // ~40 req/min: very generous for active shopping and product sync
+    skip: (req) => req.method === 'OPTIONS' || req.path === '/api/health' || req.path === '/health',
+    message: 'Too many requests from this IP address. Please slow down and try again shortly.',
   });
 
-  const authLimiter = rateLimit({
+  // 2. Authentication & User Profile Limiter: Strict limit for auth queries and patron profile lookups
+  const authLimiter = createRateLimiter({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 40,
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: false,
-    message: { error: 'Authentication / profile request limit reached. Please try again after 15 minutes.' },
+    limit: 30,
+    message: 'Authentication and profile request limit reached. Please wait 15 minutes before retrying.',
   });
 
-  const paymentLimiter = rateLimit({
+  // 3. Payment & Order Placement Limiter: Strict limit for Razorpay order generation and signature verification
+  // Accommodates patron payment retries while preventing automated card testing and checkout abuse
+  const paymentLimiter = createRateLimiter({
     windowMs: 10 * 60 * 1000, // 10 minutes
-    max: 40, // Allows payment retries & status polls while preventing payment endpoint flood
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: false,
-    message: { error: 'Payment request limit reached. Please wait a few moments before trying again.' },
+    limit: 30,
+    message: 'Payment and checkout request limit reached. Please wait a few moments before trying again.',
   });
 
-  const couponLimiter = rateLimit({
+  // 4. Payment Config & Methods Limiter: Public endpoint for retrieving public key ID and enabled payment methods
+  const paymentInfoLimiter = createRateLimiter({
     windowMs: 10 * 60 * 1000, // 10 minutes
-    max: 25, // Throttles coupon code brute-force attempts
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: false,
-    message: { valid: false, message: 'Too many coupon attempts. Please try again in 10 minutes.' },
+    limit: 100,
+    message: 'Too many payment information requests. Please wait a moment before trying again.',
   });
 
-  const sensitiveActionLimiter = rateLimit({
+  // 5. Coupon Code Validation Limiter: Throttles automated coupon code brute-force dictionary attacks
+  const couponLimiter = createRateLimiter({
+    windowMs: 10 * 60 * 1000, // 10 minutes
+    limit: 20,
+    message: 'Too many coupon attempts. Please try again in 10 minutes.',
+    extraFields: { valid: false },
+  });
+
+  // 6. Customer Return Creation Limiter: Protects return filing from scripted submissions
+  const returnLimiter = createRateLimiter({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 120,
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: false,
-    message: { error: 'Administrative action limit exceeded. Please try again later.' },
+    limit: 15,
+    message: 'Return request limit reached. Please wait before submitting additional returns.',
   });
 
-  const reviewLimiter = rateLimit({
+  // 7. Order Cancellation Limiter: Throttles patron order cancellation requests
+  const orderCancelLimiter = createRateLimiter({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 15,
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: false,
-    message: { error: 'Too many product reviews submitted. Please try again later.' },
+    limit: 15,
+    message: 'Too many cancellation requests. Please try again in 15 minutes.',
   });
 
-  const newsletterLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    validate: false,
-    message: { error: 'Too many newsletter subscription attempts. Please try again later.' },
+  // 8. Refund & Return Processing Action Limiter: Protects admin approval, inspection, and refund triggers
+  const refundLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    limit: 60,
+    message: 'Refund or return processing limit reached. Please try again in a few moments.',
   });
 
+  // 9. Admin Operations Limiter: Protects catalog editing, metrics, bulk order updates, and admin actions
+  const adminLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    limit: 120,
+    message: 'Administrative action limit exceeded. Please try again later.',
+  });
+
+  // 10. Email & Newsletter Limiter: Throttles newsletter subscriptions and outgoing email triggers
+  const emailLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    limit: 10,
+    message: 'Too many email requests submitted from this IP. Please try again in 15 minutes.',
+  });
+
+  // 11. Product Review Submission Limiter: Prevents review spam on public products
+  const reviewLimiter = createRateLimiter({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    limit: 15,
+    message: 'Too many product reviews submitted. Please try again later.',
+  });
+
+  // 12. Wishlist Toggle Limiter: Accommodates active bookmarking while preventing spamming
+  const wishlistLimiter = createRateLimiter({
+    windowMs: 10 * 60 * 1000, // 10 minutes
+    limit: 100,
+    message: 'Too many wishlist actions. Please wait a moment before trying again.',
+  });
+
+  // Apply general API rate limiting to all /api/ endpoints (excludes HTML pages and static assets)
   app.use('/api/', globalApiLimiter);
+
+  // Apply authentication rate limiting to auth/login route paths
+  app.use(['/api/auth', '/api/login', '/api/admin/login'], authLimiter);
 
   app.use(
     express.json({
@@ -832,7 +915,7 @@ async function startServer() {
   });
 
   // 4. POST Create new product (ADMIN ONLY)
-  app.post('/api/products', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.post('/api/products', adminLimiter, requireAdmin, async (req, res) => {
     const validation = ProductInputSchema.safeParse(req.body);
     if (!validation.success) {
       return res.status(400).json({
@@ -867,8 +950,9 @@ async function startServer() {
       colorHex: data.colorHex || '#3a2012',
       material: data.material || 'Full-Grain Vegetable Tanned Leather',
       dimensions: data.dimensions || '',
-      rating: 5.0,
-      reviewsCount: 1,
+      rating: 0,
+      reviewsCount: 0,
+      reviews: [],
       badge: (data.badge || 'NEW') as any,
       inStock: data.inStock !== undefined ? data.inStock : true,
       images: data.images?.length ? data.images : ['https://images.unsplash.com/photo-1627123424574-724758594e93?auto=format&fit=crop&w=800&q=80'],
@@ -920,7 +1004,7 @@ async function startServer() {
   });
 
   // 5. PATCH Update product (ADMIN ONLY)
-  app.patch('/api/products/:id', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.patch('/api/products/:id', adminLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const validation = ProductPatchSchema.safeParse(req.body);
     if (!validation.success) {
@@ -998,7 +1082,7 @@ async function startServer() {
   });
 
   // 6. DELETE Product (ADMIN ONLY)
-  app.delete('/api/products/:id', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.delete('/api/products/:id', adminLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
 
     try {
@@ -1044,6 +1128,35 @@ async function startServer() {
 
     try {
       await supabase.from('product_reviews').insert(newReview);
+
+      // Recalculate product rating and reviews_count based solely on genuine database records
+      const { data: revs } = await supabase.from('product_reviews').select('rating').eq('product_id', id);
+      if (revs && revs.length > 0) {
+        const count = revs.length;
+        const avg = Number((revs.reduce((sum: number, r: any) => sum + (Number(r.rating) || 0), 0) / count).toFixed(1));
+        await supabase.from('products').update({
+          rating: avg,
+          reviews_count: count,
+        }).eq('id', id);
+
+        const inMemoryProd = products.find(p => p.id === id || p.slug === id);
+        if (inMemoryProd) {
+          inMemoryProd.rating = avg;
+          inMemoryProd.reviewsCount = count;
+          if (!inMemoryProd.reviews) inMemoryProd.reviews = [];
+          inMemoryProd.reviews.unshift({
+            id: newReview.id,
+            productId: id,
+            authorName: newReview.author_name,
+            authorEmail: newReview.author_email,
+            rating: newReview.rating,
+            title: newReview.title,
+            comment: newReview.comment,
+            date: newReview.date,
+            verifiedPurchase: newReview.verified_purchase,
+          });
+        }
+      }
     } catch (e) {
       console.warn('Supabase review insert notice:', e);
     }
@@ -1189,7 +1302,7 @@ async function startServer() {
   });
 
   // 10. DELETE Order (ADMIN ONLY)
-  app.delete('/api/orders/:id', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.delete('/api/orders/:id', adminLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const cleanId = id.replace(/^#/, '');
     const targetIds = Array.from(new Set([id, cleanId, `#${cleanId}`])).filter(Boolean);
@@ -1308,9 +1421,10 @@ async function startServer() {
 
     const validSubtotal = Math.max(0, Number(subtotal) || 0);
     const discountAmount = Math.round(validSubtotal * 0.10);
-    const taxableAmount = Math.max(0, validSubtotal - discountAmount);
-    const taxes = Math.round(taxableAmount * 0.18);
-    const total = taxableAmount + taxes; // Shipping is FREE
+    const discountedAmount = Math.max(0, validSubtotal - discountAmount);
+    // Product prices are GST/tax-inclusive. The 18% GST component embedded in selling price:
+    const taxes = Math.round(discountedAmount - (discountedAmount / 1.18));
+    const total = discountedAmount; // Shipping is FREE, product prices are tax-inclusive
 
     return {
       valid: true,
@@ -1421,10 +1535,11 @@ async function startServer() {
       }
     }
 
-    const taxableAmount = Math.max(0, subtotal - discountAmount);
-    const taxes = Math.round(taxableAmount * 0.18);
+    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
     const shipping = Number(incomingOrder.shipping) || 0;
-    const total = taxableAmount + taxes + shipping;
+    // Product prices are GST/tax-inclusive. The 18% GST component embedded in selling price:
+    const taxes = Math.round(discountedSubtotal - (discountedSubtotal / 1.18));
+    const total = discountedSubtotal + shipping;
 
     const newOrder: Order = {
       id: orderId,
@@ -1535,7 +1650,7 @@ async function startServer() {
   // ================= RAZORPAY PAYMENT ENDPOINTS =================
 
   // 12. GET Public Razorpay Key ID (Public)
-  app.get(['/api/payments/key', '/payments/key'], (req, res) => {
+  app.get(['/api/payments/key', '/payments/key'], paymentInfoLimiter, (req, res) => {
     const keyId = cleanEnvKey(process.env.RAZORPAY_KEY_ID);
     const keySecret = cleanEnvKey(process.env.RAZORPAY_KEY_SECRET);
     if (!keyId) {
@@ -1585,7 +1700,7 @@ async function startServer() {
 
   // 13. Razorpay Order Creation Endpoint (Public / Customer)
   // Support GET & HEAD probes for route verification, health monitoring, and deployment checks
-  app.get(['/api/payments/create-order', '/payments/create-order'], (req, res) => {
+  app.get(['/api/payments/create-order', '/payments/create-order'], paymentInfoLimiter, (req, res) => {
     const keyId = cleanEnvKey(process.env.RAZORPAY_KEY_ID);
     const keySecret = cleanEnvKey(process.env.RAZORPAY_KEY_SECRET);
     res.json({
@@ -1639,7 +1754,7 @@ async function startServer() {
 
       // SERVER-SIDE COUPON VALIDATION & CALCULATION BEFORE RAZORPAY ORDER CREATION:
       if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
-        const parsedSubtotal = Number(subtotal) > 0 ? Number(subtotal) : (payableAmount > 0 ? Math.round(payableAmount / 1.18) : 0);
+        const parsedSubtotal = Number(subtotal) > 0 ? Number(subtotal) : payableAmount;
         
         const couponCheck = await validateCoupon(couponCode, parsedSubtotal, {
           userId: effectiveUserId,
@@ -1657,6 +1772,9 @@ async function startServer() {
         appliedCoupon = couponCheck.code || 'NEW10';
         calculatedDiscount = couponCheck.discountAmount || 0;
         payableAmount = couponCheck.total || payableAmount;
+      } else if (Number(subtotal) > 0) {
+        // Product prices are tax-inclusive. Total = Subtotal + Shipping (0)
+        payableAmount = Number(subtotal);
       }
 
       if (!payableAmount || payableAmount <= 0) {
@@ -1750,7 +1868,7 @@ async function startServer() {
   });
 
   // 14. GET Fetch Enabled Razorpay Payment Methods (Public)
-  app.get(['/api/payments/methods', '/payments/methods'], async (req, res) => {
+  app.get(['/api/payments/methods', '/payments/methods'], paymentInfoLimiter, async (req, res) => {
     try {
       const keyId = cleanEnvKey(process.env.RAZORPAY_KEY_ID);
       if (!keyId) {
@@ -1773,7 +1891,7 @@ async function startServer() {
   });
 
   // 15. POST Verify Razorpay Payment Signature (Public / Customer)
-  app.get(['/api/payments/verify', '/payments/verify'], (req, res) => {
+  app.get(['/api/payments/verify', '/payments/verify'], paymentInfoLimiter, (req, res) => {
     res.json({
       success: true,
       endpoint: '/api/payments/verify',
@@ -2098,7 +2216,7 @@ async function startServer() {
   });
 
   // 18. POST Regenerate Shipping Label (ADMIN ONLY)
-  app.post('/api/orders/:id/shipping-label/regenerate', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.post('/api/orders/:id/shipping-label/regenerate', adminLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const authToken = (req as any).authToken;
     const client = getScopedSupabase(authToken);
@@ -2123,7 +2241,7 @@ async function startServer() {
   });
 
   // 19. PATCH Order status (ADMIN ONLY)
-  app.patch('/api/orders/:id/status', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.patch('/api/orders/:id/status', adminLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const validation = OrderStatusPatchSchema.safeParse(req.body);
     if (!validation.success) {
@@ -2412,12 +2530,12 @@ async function startServer() {
     }
   };
 
-  app.post('/api/orders/bulk-status', sensitiveActionLimiter, requireAdmin, handleBulkOrderStatusUpdate);
-  app.post('/api/admin/orders/bulk-status', sensitiveActionLimiter, requireAdmin, handleBulkOrderStatusUpdate);
-  app.patch('/api/admin/orders/bulk-status', sensitiveActionLimiter, requireAdmin, handleBulkOrderStatusUpdate);
+  app.post('/api/orders/bulk-status', adminLimiter, requireAdmin, handleBulkOrderStatusUpdate);
+  app.post('/api/admin/orders/bulk-status', adminLimiter, requireAdmin, handleBulkOrderStatusUpdate);
+  app.patch('/api/admin/orders/bulk-status', adminLimiter, requireAdmin, handleBulkOrderStatusUpdate);
 
   // 19.1 POST Cancel Order (AUTHENTICATED CUSTOMER OR ADMIN)
-  app.post('/api/orders/:id/cancel', sensitiveActionLimiter, requireAuth, async (req, res) => {
+  app.post('/api/orders/:id/cancel', orderCancelLimiter, requireAuth, async (req, res) => {
     const { id } = req.params;
     const user = (req as any).user;
     const isAdmin = (req as any).isAdmin;
@@ -2741,8 +2859,8 @@ async function startServer() {
     }
   };
 
-  app.post('/api/orders/:id/mark-refunded', sensitiveActionLimiter, requireAdmin, handleMarkOrderRefunded);
-  app.post('/api/admin/orders/:id/mark-refunded', sensitiveActionLimiter, requireAdmin, handleMarkOrderRefunded);
+  app.post('/api/orders/:id/mark-refunded', refundLimiter, requireAdmin, handleMarkOrderRefunded);
+  app.post('/api/admin/orders/:id/mark-refunded', refundLimiter, requireAdmin, handleMarkOrderRefunded);
 
   // ==============================================================================
   // RETURN & REFUND MANAGEMENT SYSTEM API ENDPOINTS
@@ -2769,7 +2887,7 @@ async function startServer() {
   };
 
   // 19.1 POST /api/returns: Create customer return request (Strict 7-Day & 3-Reason Return Policy)
-  app.post('/api/returns', sensitiveActionLimiter, requireAuth, async (req, res) => {
+  app.post('/api/returns', returnLimiter, requireAuth, async (req, res) => {
     const user = (req as any).user;
     const isAdmin = (req as any).isAdmin;
     const authToken = (req as any).authToken;
@@ -3292,7 +3410,7 @@ async function startServer() {
   });
 
   // 19.3.1 DELETE /api/admin/returns/:id: Permanently delete return request (Admin only)
-  app.delete(['/api/admin/returns/:id', '/api/returns/:id'], sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.delete(['/api/admin/returns/:id', '/api/returns/:id'], adminLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const cleanId = decodeURIComponent(String(id || '')).trim();
     const client = getServiceSupabase() || getScopedSupabase((req as any).authToken);
@@ -3330,7 +3448,7 @@ async function startServer() {
   });
 
   // 19.3b GET /api/admin/returns/pending-count: Pending return requests requiring admin attention (status = RETURN_REQUESTED)
-  app.get('/api/admin/returns/pending-count', requireAdmin, async (req, res) => {
+  app.get('/api/admin/returns/pending-count', adminLimiter, requireAdmin, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -3357,7 +3475,7 @@ async function startServer() {
   });
 
   // 19.4 POST /api/admin/returns/:id/approve: Approve return request
-  app.post('/api/admin/returns/:id/approve', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.post('/api/admin/returns/:id/approve', refundLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const user = (req as any).user;
     const dbClient = getServiceSupabase();
@@ -3499,7 +3617,7 @@ async function startServer() {
   });
 
   // 19.5 POST /api/admin/returns/:id/reject: Reject return request with mandatory reason
-  app.post('/api/admin/returns/:id/reject', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.post('/api/admin/returns/:id/reject', refundLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const user = (req as any).user;
     const authToken = (req as any).authToken;
@@ -3736,11 +3854,11 @@ async function startServer() {
   };
 
   // 19.6 POST /api/admin/returns/:id/courier-status and /api/admin/returns/:id/courier
-  app.post('/api/admin/returns/:id/courier-status', sensitiveActionLimiter, requireAdmin, handleCourierStatusUpdate);
-  app.post('/api/admin/returns/:id/courier', sensitiveActionLimiter, requireAdmin, handleCourierStatusUpdate);
+  app.post('/api/admin/returns/:id/courier-status', refundLimiter, requireAdmin, handleCourierStatusUpdate);
+  app.post('/api/admin/returns/:id/courier', refundLimiter, requireAdmin, handleCourierStatusUpdate);
 
   // 19.7 POST /api/admin/returns/:id/inspection: Kolkata Physical Inspection recording
-  app.post('/api/admin/returns/:id/inspection', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.post('/api/admin/returns/:id/inspection', refundLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const user = (req as any).user;
     const authToken = (req as any).authToken;
@@ -3830,7 +3948,7 @@ async function startServer() {
   });
 
   // 19.8 POST /api/admin/returns/:id/refund: Manual Refund Workflow
-  app.post('/api/admin/returns/:id/refund', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.post('/api/admin/returns/:id/refund', refundLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const user = (req as any).user;
     const authToken = (req as any).authToken;
@@ -3968,7 +4086,7 @@ async function startServer() {
   });
 
   // 19.9 POST /api/admin/returns/:id/status: Generic manual status transition endpoint
-  app.post('/api/admin/returns/:id/status', sensitiveActionLimiter, requireAdmin, async (req, res) => {
+  app.post('/api/admin/returns/:id/status', refundLimiter, requireAdmin, async (req, res) => {
     const { id } = req.params;
     const user = (req as any).user;
     const authToken = (req as any).authToken;
@@ -4121,7 +4239,7 @@ async function startServer() {
   });
 
   // 21. POST Wishlist Toggle (AUTHENTICATED USERS ONLY)
-  app.post('/api/user/wishlist/toggle', requireAuth, async (req, res) => {
+  app.post('/api/user/wishlist/toggle', wishlistLimiter, requireAuth, async (req, res) => {
     const user = (req as any).user;
     const validation = WishlistToggleSchema.safeParse(req.body);
     if (!validation.success) {
@@ -4157,7 +4275,7 @@ async function startServer() {
   });
 
   // 22. GET Admin Metrics & Analytics (ADMIN ONLY)
-  app.get('/api/admin/metrics', requireAdmin, async (req, res) => {
+  app.get('/api/admin/metrics', adminLimiter, requireAdmin, async (req, res) => {
     try {
       const { data: dbOrders } = await supabase.from('orders').select('*');
       const validOrders = dbOrders || [];
@@ -4186,7 +4304,7 @@ async function startServer() {
   });
 
   // 23. POST Newsletter subscribe (Public)
-  app.post('/api/newsletter', newsletterLimiter, (req, res) => {
+  app.post('/api/newsletter', emailLimiter, (req, res) => {
     const validation = NewsletterSchema.safeParse(req.body);
     if (!validation.success) {
       return res.status(400).json({
@@ -4659,6 +4777,31 @@ async function startServer() {
     }
     return res.status(200).type('text/html; charset=utf-8').send('<!doctype html><html lang="en"><head><title>STUNNING BIRDS</title></head><body><div id="root"></div></body></html>');
   });
+
+  // Audit products in database on startup: remove any fake ratings or reviewsCount where no genuine reviews exist
+  (async () => {
+    try {
+      const client = getServiceSupabase() || supabase;
+      const { data: dbProducts } = await client.from('products').select('id, rating, reviews_count, product_reviews(*)');
+      if (dbProducts && dbProducts.length > 0) {
+        for (const p of dbProducts) {
+          const actualReviews = Array.isArray(p.product_reviews) ? p.product_reviews : [];
+          const actualCount = actualReviews.length;
+          const actualRating = actualCount > 0
+            ? Number((actualReviews.reduce((sum: number, r: any) => sum + (Number(r.rating) || 0), 0) / actualCount).toFixed(1))
+            : 0;
+          if (p.reviews_count !== actualCount || Number(p.rating) !== actualRating) {
+            await client.from('products').update({
+              rating: actualRating,
+              reviews_count: actualCount,
+            }).eq('id', p.id);
+          }
+        }
+      }
+    } catch (_syncErr) {
+      // Non-blocking sync
+    }
+  })();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`STUNNING BIRDS secure server running on http://0.0.0.0:${PORT}`);

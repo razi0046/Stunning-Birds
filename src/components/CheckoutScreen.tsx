@@ -56,9 +56,11 @@ export const CheckoutScreen: React.FC = () => {
   const discountAmount = appliedCoupon ? Math.round(subtotal * (discountPercentage / 100)) : 0;
   const discountedSubtotal = Math.max(0, subtotal - discountAmount);
   const shippingCost = 0;
-  const taxes = Math.round(discountedSubtotal * 0.18);
-  const total = discountedSubtotal + shippingCost + taxes;
-  const undiscountedTotal = subtotal + shippingCost + Math.round(subtotal * 0.18);
+  // Product prices are GST/tax-inclusive. The 18% GST component embedded inside the selling price:
+  const taxes = Math.round(discountedSubtotal - (discountedSubtotal / 1.18));
+  // Total = Tax-Inclusive Product Subtotal + Shipping (taxes are not added on top)
+  const total = discountedSubtotal + shippingCost;
+  const undiscountedTotal = subtotal + shippingCost;
 
   // Handle Coupon Apply
   const handleApplyCoupon = async (e?: React.FormEvent) => {
@@ -872,8 +874,8 @@ export const CheckoutScreen: React.FC = () => {
               <span className="font-medium text-[#15803d]">FREE</span>
             </div>
             <div className="flex justify-between text-[#6e665e]">
-              <span>GST (18% Estimated)</span>
-              <span className="font-medium text-[#181614]">{formatINR(taxes)}</span>
+              <span>Taxes (GST 18%)</span>
+              <span className="font-medium text-[#15803d]">Included in price</span>
             </div>
             <div className="flex justify-between items-baseline pt-3 border-t border-[#ded3c2]">
               <div>

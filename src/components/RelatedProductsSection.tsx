@@ -244,15 +244,21 @@ export const RelatedProductsSection: React.FC<RelatedProductsSectionProps> = ({ 
                 {/* Rating & In-Stock Status */}
                 <div className="flex items-center justify-between pt-1 text-[11px] text-[#78716c]">
                   <div className="flex items-center gap-1">
-                    <div className="flex items-center text-[#d4af37]">
-                      {[...Array(5)].map((_, i) => (
-                        <Star
-                          key={i}
-                          className={`w-3 h-3 ${i < Math.floor(product.rating || 5) ? 'fill-[#d4af37]' : 'text-[#ded5c7]'}`}
-                        />
-                      ))}
-                    </div>
-                    <span className="text-[10px]">({product.reviewsCount || 0})</span>
+                    {product.reviewsCount && product.reviewsCount > 0 && product.rating > 0 ? (
+                      <>
+                        <div className="flex items-center text-[#d4af37]">
+                          {[...Array(5)].map((_, i) => (
+                            <Star
+                              key={i}
+                              className={`w-3 h-3 ${i < Math.floor(product.rating) ? 'fill-[#d4af37]' : 'text-[#ded5c7]'}`}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-[10px]">({product.reviewsCount})</span>
+                      </>
+                    ) : (
+                      <span className="text-[10px] text-[#a8a199]">No reviews yet</span>
+                    )}
                   </div>
 
                   <span className="text-[10px] font-medium text-[#8c562e]">

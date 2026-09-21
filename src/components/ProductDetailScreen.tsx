@@ -17,7 +17,6 @@ import {
 } from 'lucide-react';
 import { useShop } from '../context/ShopContext';
 import { formatINR } from '../utils/formatCurrency';
-import { DEFAULT_PRODUCT_REVIEWS } from '../data/mockData';
 import { ProductReview } from '../types';
 import { RelatedProductsSection } from './RelatedProductsSection';
 import { applyProductSEO, resetDefaultSEO, getProductCanonicalUrl, getEffectiveProductSEO } from '../utils/seoHelper';
@@ -193,33 +192,10 @@ export const ProductDetailScreen: React.FC = () => {
     return `Delivery till ${day} ${month} ${year}`;
   }, []);
 
-  // Reviews data (from product or fallback defaults)
-  const productReviews: ProductReview[] = selectedProduct.reviews && selectedProduct.reviews.length > 0
+  // Reviews data: strictly genuine customer reviews loaded from database
+  const productReviews: ProductReview[] = Array.isArray(selectedProduct.reviews)
     ? selectedProduct.reviews
-    : (DEFAULT_PRODUCT_REVIEWS[selectedProduct.id] || [
-        {
-          id: `rev-default-${selectedProduct.id}-1`,
-          productId: selectedProduct.id,
-          authorName: 'A. Sterling',
-          authorAvatar: 'AS',
-          rating: 5,
-          title: 'Exemplary craftsmanship and unmatched leather feel',
-          comment: `The quality of the ${selectedProduct.name} is sublime. The stitching is mathematically precise and the leather scent is authentic vegetable-tanned Italian grain.`,
-          date: 'Jan 15, 2025',
-          verifiedPurchase: true,
-        },
-        {
-          id: `rev-default-${selectedProduct.id}-2`,
-          productId: selectedProduct.id,
-          authorName: 'Julian Hayes',
-          authorAvatar: 'JH',
-          rating: 5,
-          title: 'A true heirloom everyday carry',
-          comment: 'Fits comfortably in tailored pockets. The burnished edges and rich depth of color exceed expectations.',
-          date: 'Dec 22, 2024',
-          verifiedPurchase: true,
-        }
-      ]);
+    : [];
 
   // Filtered reviews
   const filteredReviews = activeRatingFilter === 'all'
@@ -235,6 +211,9 @@ export const ProductDetailScreen: React.FC = () => {
     1: productReviews.filter(r => r.rating === 1).length,
   };
   const totalReviewsCount = productReviews.length;
+  const effectiveRating = totalReviewsCount > 0
+    ? Number((productReviews.reduce((sum, r) => sum + (Number(r.rating) || 0), 0) / totalReviewsCount).toFixed(1))
+    : (selectedProduct.reviewsCount && selectedProduct.reviewsCount > 0 && selectedProduct.rating > 0 ? selectedProduct.rating : 0);
 
   const toggleSection = (section: string) => {
     setOpenAccordion(openAccordion === section ? null : section);
@@ -560,26 +539,43 @@ export const ProductDetailScreen: React.FC = () => {
 
               {/* Rating summary link */}
               <div className="flex items-center gap-2 text-xs">
-                <div className="flex items-center text-[#d4af37]">
-                  {[...Array(5)].map((_, i) => (
-                    <Star
-                      key={i}
-                      className={`w-3.5 h-3.5 ${
-                        i < Math.floor(selectedProduct.rating)
-                          ? 'fill-[#d4af37] text-[#d4af37]'
-                          : 'fill-transparent text-[#d4af37]'
-                      }`}
-                    />
-                  ))}
-                </div>
-                <span className="font-semibold text-[#181614]">{selectedProduct.rating.toFixed(1)}</span>
-                <span className="text-[#8c857d]">•</span>
-                <a
-                  href="#customer-reviews-section"
-                  className="text-[#8c562e] hover:underline font-medium cursor-pointer"
-                >
-                  {totalReviewsCount} {totalReviewsCount === 1 ? 'Patron Review' : 'Patron Reviews'}
-                </a>
+                {totalReviewsCount > 0 && effectiveRating > 0 ? (
+                  <>
+                    <div className="flex items-center text-[#d4af37]">
+                      {[...Array(5)].map((_, i) => (
+                        <Star
+                          key={i}
+                          className={`w-3.5 h-3.5 ${
+                            i < Math.floor(effectiveRating)
+                              ? 'fill-[#d4af37] text-[#d4af37]'
+                              : 'fill-transparent text-[#d4af37]'
+                          }`}
+                        />
+                      ))}
+                    </div>
+                    <span className="font-semibold text-[#181614]">{effectiveRating.toFixed(1)}</span>
+                    <span className="text-[#8c857d]">•</span>
+                    <a
+                      href="#customer-reviews-section"
+                      className="text-[#8c562e] hover:underline font-medium cursor-pointer"
+                    >
+                      {totalReviewsCount} {totalReviewsCount === 1 ? 'Patron Review' : 'Patron Reviews'}
+                    </a>
+                  </>
+                ) : (
+                  <a
+                    href="#customer-reviews-section"
+                    className="inline-flex items-center gap-1.5 text-[#8c857d] hover:text-[#8c562e] transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center text-[#ded5c7]">
+                      {[...Array(5)].map((_, i) => (
+                        <Star key={i} className="w-3.5 h-3.5 fill-transparent text-[#ded5c7]" />
+                      ))}
+                    </div>
+                    <span className="font-medium text-[#736a61]">No reviews yet</span>
+                    <span className="text-[#8c562e] underline text-[11px] ml-1">Be the first to review</span>
+                  </a>
+                )}
               </div>
 
               {/* Product Price Display with dynamic MRP strikethrough */}
@@ -962,68 +958,82 @@ export const ProductDetailScreen: React.FC = () => {
         </div>
 
         {/* Rating Overview Dashboard */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 bg-[#fbf9f5] border border-[#e4d9cb] p-6 sm:p-8 rounded-xs">
-          
-          {/* Overall Score */}
-          <div className="lg:col-span-4 flex flex-col items-center justify-center border-b lg:border-b-0 lg:border-r border-[#e4d9cb] pb-6 lg:pb-0 lg:pr-8 text-center space-y-3">
-            <span className="font-serif-luxury text-5xl sm:text-6xl font-bold text-[#181614]">
-              {selectedProduct.rating.toFixed(1)}
-            </span>
-            <div className="flex items-center text-[#d4af37] gap-1">
+        {totalReviewsCount > 0 && effectiveRating > 0 ? (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 bg-[#fbf9f5] border border-[#e4d9cb] p-6 sm:p-8 rounded-xs">
+            {/* Overall Score */}
+            <div className="lg:col-span-4 flex flex-col items-center justify-center border-b lg:border-b-0 lg:border-r border-[#e4d9cb] pb-6 lg:pb-0 lg:pr-8 text-center space-y-3">
+              <span className="font-serif-luxury text-5xl sm:text-6xl font-bold text-[#181614]">
+                {effectiveRating.toFixed(1)}
+              </span>
+              <div className="flex items-center text-[#d4af37] gap-1">
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <Star
+                    key={star}
+                    className={`w-5 h-5 ${
+                      star <= Math.round(effectiveRating)
+                        ? 'fill-[#d4af37] text-[#d4af37]'
+                        : 'fill-transparent text-[#d4af37]'
+                    }`}
+                  />
+                ))}
+              </div>
+              <p className="text-xs text-[#736a61] font-medium">
+                Based on <strong className="text-[#181614]">{totalReviewsCount}</strong> verified patron {totalReviewsCount === 1 ? 'review' : 'reviews'}
+              </p>
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-white border border-[#ded5c7] rounded-full text-[11px] text-[#8c562e] font-semibold">
+                <ShieldCheck className="w-3.5 h-3.5 text-[#8c562e]" />
+                <span>100% Verified Atelier Purchases</span>
+              </div>
+            </div>
+
+            {/* Rating Breakdown Bars */}
+            <div className="lg:col-span-8 flex flex-col justify-center space-y-2.5">
+              {[5, 4, 3, 2, 1].map((stars) => {
+                const count = ratingCounts[stars as keyof typeof ratingCounts] || 0;
+                const percentage = totalReviewsCount > 0 ? Math.round((count / totalReviewsCount) * 100) : 0;
+                return (
+                  <div key={stars} className="flex items-center gap-3 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setActiveRatingFilter(activeRatingFilter === stars ? 'all' : stars)}
+                      className={`w-14 text-left font-medium cursor-pointer transition-colors ${
+                        activeRatingFilter === stars ? 'text-[#8c562e] font-bold underline' : 'text-[#181614] hover:text-[#8c562e]'
+                      }`}
+                    >
+                      {stars} Stars
+                    </button>
+                    <div className="flex-1 h-2.5 bg-[#eae3d5] rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[#8c562e] transition-all duration-500 rounded-full"
+                        style={{ width: `${percentage}%` }}
+                      />
+                    </div>
+                    <span className="w-10 text-right text-gray-500 font-mono text-[11px]">
+                      {percentage}%
+                    </span>
+                    <span className="w-8 text-right text-[#8c857d] font-mono text-[11px]">
+                      ({count})
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <div className="bg-[#fbf9f5] border border-[#e4d9cb] p-8 sm:p-10 rounded-xs text-center space-y-3">
+            <div className="flex items-center justify-center text-[#ded5c7] gap-1.5">
               {[1, 2, 3, 4, 5].map((star) => (
-                <Star
-                  key={star}
-                  className={`w-5 h-5 ${
-                    star <= Math.round(selectedProduct.rating)
-                      ? 'fill-[#d4af37] text-[#d4af37]'
-                      : 'fill-transparent text-[#d4af37]'
-                  }`}
-                />
+                <Star key={star} className="w-5 h-5 fill-transparent text-[#ded5c7]" />
               ))}
             </div>
-            <p className="text-xs text-[#736a61] font-medium">
-              Based on <strong className="text-[#181614]">{totalReviewsCount}</strong> verified patron {totalReviewsCount === 1 ? 'review' : 'reviews'}
+            <h3 className="font-serif-luxury text-xl sm:text-2xl font-semibold text-[#181614]">
+              No reviews yet
+            </h3>
+            <p className="text-xs sm:text-sm text-[#736a61] max-w-md mx-auto">
+              This handcrafted piece currently has 0 customer reviews. Be the first verified patron to share your experience with this bespoke creation.
             </p>
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-white border border-[#ded5c7] rounded-full text-[11px] text-[#8c562e] font-semibold">
-              <ShieldCheck className="w-3.5 h-3.5 text-[#8c562e]" />
-              <span>100% Verified Atelier Purchases</span>
-            </div>
           </div>
-
-          {/* Rating Breakdown Bars */}
-          <div className="lg:col-span-8 flex flex-col justify-center space-y-2.5">
-            {[5, 4, 3, 2, 1].map((stars) => {
-              const count = ratingCounts[stars as keyof typeof ratingCounts] || 0;
-              const percentage = totalReviewsCount > 0 ? Math.round((count / totalReviewsCount) * 100) : 0;
-              return (
-                <div key={stars} className="flex items-center gap-3 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setActiveRatingFilter(activeRatingFilter === stars ? 'all' : stars)}
-                    className={`w-14 text-left font-medium cursor-pointer transition-colors ${
-                      activeRatingFilter === stars ? 'text-[#8c562e] font-bold underline' : 'text-[#181614] hover:text-[#8c562e]'
-                    }`}
-                  >
-                    {stars} Stars
-                  </button>
-                  <div className="flex-1 h-2.5 bg-[#eae3d5] rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-[#8c562e] transition-all duration-500 rounded-full"
-                      style={{ width: `${percentage}%` }}
-                    />
-                  </div>
-                  <span className="w-10 text-right text-gray-500 font-mono text-[11px]">
-                    {percentage}%
-                  </span>
-                  <span className="w-8 text-right text-[#8c857d] font-mono text-[11px]">
-                    ({count})
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-
-        </div>
+        )}
 
         {/* WRITE A REVIEW FORM / AUTH PROMPT */}
         <div className="bg-white border border-[#e4d9cb] p-6 sm:p-8 rounded-xs shadow-2xs">
@@ -1159,115 +1169,120 @@ export const ProductDetailScreen: React.FC = () => {
           )}
         </div>
 
-        {/* Filter Pills & Reviews Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#ece4d8] pb-4">
-          <div className="flex items-center gap-2">
-            <h3 className="font-serif-luxury text-xl font-semibold text-[#181614]">
-              Patron Testimonials
-            </h3>
-            <span className="px-2 py-0.5 bg-[#f6f2ea] border border-[#ded5c7] rounded-full text-[11px] font-mono font-bold text-[#8c562e]">
-              {filteredReviews.length}
-            </span>
-          </div>
+        {/* Reviews Cards List & Filter Tabs (Only shown when reviews exist) */}
+        {totalReviewsCount > 0 && (
+          <>
+            {/* Filter Pills & Reviews Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#ece4d8] pb-4">
+              <div className="flex items-center gap-2">
+                <h3 className="font-serif-luxury text-xl font-semibold text-[#181614]">
+                  Patron Testimonials
+                </h3>
+                <span className="px-2 py-0.5 bg-[#f6f2ea] border border-[#ded5c7] rounded-full text-[11px] font-mono font-bold text-[#8c562e]">
+                  {filteredReviews.length}
+                </span>
+              </div>
 
-          {/* Star Filter Tabs */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 text-xs">
-            <button
-              onClick={() => setActiveRatingFilter('all')}
-              className={`px-3 py-1.5 rounded-xs transition-colors cursor-pointer font-medium whitespace-nowrap ${
-                activeRatingFilter === 'all'
-                  ? 'bg-[#181614] text-white'
-                  : 'bg-[#f6f2ea] text-[#5c544d] hover:bg-[#eae3d5]'
-              }`}
-            >
-              All ({totalReviewsCount})
-            </button>
-            {[5, 4, 3, 2, 1].map((st) => {
-              const count = ratingCounts[st as keyof typeof ratingCounts] || 0;
-              return (
+              {/* Star Filter Tabs */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 text-xs">
                 <button
-                  key={st}
-                  onClick={() => setActiveRatingFilter(st)}
-                  className={`px-3 py-1.5 rounded-xs transition-colors cursor-pointer font-medium whitespace-nowrap flex items-center gap-1 ${
-                    activeRatingFilter === st
-                      ? 'bg-[#8c562e] text-white'
+                  onClick={() => setActiveRatingFilter('all')}
+                  className={`px-3 py-1.5 rounded-xs transition-colors cursor-pointer font-medium whitespace-nowrap ${
+                    activeRatingFilter === 'all'
+                      ? 'bg-[#181614] text-white'
                       : 'bg-[#f6f2ea] text-[#5c544d] hover:bg-[#eae3d5]'
                   }`}
                 >
-                  <span>{st}★</span>
-                  <span className="text-[10px] opacity-80">({count})</span>
+                  All ({totalReviewsCount})
                 </button>
-              );
-            })}
-          </div>
-        </div>
+                {[5, 4, 3, 2, 1].map((st) => {
+                  const count = ratingCounts[st as keyof typeof ratingCounts] || 0;
+                  return (
+                    <button
+                      key={st}
+                      onClick={() => setActiveRatingFilter(st)}
+                      className={`px-3 py-1.5 rounded-xs transition-colors cursor-pointer font-medium whitespace-nowrap flex items-center gap-1 ${
+                        activeRatingFilter === st
+                          ? 'bg-[#8c562e] text-white'
+                          : 'bg-[#f6f2ea] text-[#5c544d] hover:bg-[#eae3d5]'
+                      }`}
+                    >
+                      <span>{st}★</span>
+                      <span className="text-[10px] opacity-80">({count})</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
-        {/* Reviews Cards List */}
-        <div className="space-y-4">
-          {filteredReviews.length > 0 ? (
-            filteredReviews.map((rev) => (
-              <motion.div
-                key={rev.id}
-                initial={{ opacity: 0, y: 15 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3 }}
-                className="bg-white border border-[#ece4d8] p-6 rounded-xs space-y-3 shadow-2xs hover:border-[#cfc2b0] transition-colors"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-[#181614] text-white flex items-center justify-center font-serif text-xs font-bold shadow-2xs">
-                      {rev.authorAvatar || rev.authorName.substring(0, 2).toUpperCase()}
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-[#181614]">{rev.authorName}</span>
-                        {rev.verifiedPurchase && (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-[#f6f2ea] border border-[#ded5c7] rounded-xs text-[9px] font-semibold text-[#8c562e]">
-                            <CheckCircle2 className="w-2.5 h-2.5 text-[#8c562e]" />
-                            <span>Verified Patron</span>
-                          </span>
-                        )}
+            {/* Reviews Cards List */}
+            <div className="space-y-4">
+              {filteredReviews.length > 0 ? (
+                filteredReviews.map((rev) => (
+                  <motion.div
+                    key={rev.id}
+                    initial={{ opacity: 0, y: 15 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="bg-white border border-[#ece4d8] p-6 rounded-xs space-y-3 shadow-2xs hover:border-[#cfc2b0] transition-colors"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-[#181614] text-white flex items-center justify-center font-serif text-xs font-bold shadow-2xs">
+                          {rev.authorAvatar || rev.authorName.substring(0, 2).toUpperCase()}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-[#181614]">{rev.authorName}</span>
+                            {rev.verifiedPurchase && (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-[#f6f2ea] border border-[#ded5c7] rounded-xs text-[9px] font-semibold text-[#8c562e]">
+                                <CheckCircle2 className="w-2.5 h-2.5 text-[#8c562e]" />
+                                <span>Verified Patron</span>
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] text-[#8c857d]">{rev.date}</span>
+                        </div>
                       </div>
-                      <span className="text-[10px] text-[#8c857d]">{rev.date}</span>
+
+                      <div className="flex items-center text-[#d4af37]">
+                        {[...Array(5)].map((_, i) => (
+                          <Star
+                            key={i}
+                            className={`w-3.5 h-3.5 ${
+                              i < rev.rating
+                                ? 'fill-[#d4af37] text-[#d4af37]'
+                                : 'fill-transparent text-[#d4af37]'
+                            }`}
+                          />
+                        ))}
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="flex items-center text-[#d4af37]">
-                    {[...Array(5)].map((_, i) => (
-                      <Star
-                        key={i}
-                        className={`w-3.5 h-3.5 ${
-                          i < rev.rating
-                            ? 'fill-[#d4af37] text-[#d4af37]'
-                            : 'fill-transparent text-[#d4af37]'
-                        }`}
-                      />
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-1 pt-1">
-                  <h4 className="text-sm font-semibold text-[#181614]">
-                    {rev.title}
+                    <div className="space-y-1 pt-1">
+                      <h4 className="text-sm font-semibold text-[#181614]">
+                        {rev.title}
+                      </h4>
+                      <p className="text-xs text-[#5c544d] leading-relaxed">
+                        {rev.comment}
+                      </p>
+                    </div>
+                  </motion.div>
+                ))
+              ) : (
+                <div className="text-center py-12 bg-[#fbf9f5] border border-dashed border-[#d8cfc0] rounded-xs space-y-2">
+                  <MessageSquare className="w-8 h-8 text-[#8c857d] mx-auto opacity-50" />
+                  <h4 className="font-serif-luxury text-base font-semibold text-[#181614]">
+                    No reviews found for this rating
                   </h4>
-                  <p className="text-xs text-[#5c544d] leading-relaxed">
-                    {rev.comment}
+                  <p className="text-xs text-[#736a61]">
+                    Try selecting "All" to view all reviews for this handcrafted piece.
                   </p>
                 </div>
-              </motion.div>
-            ))
-          ) : (
-            <div className="text-center py-12 bg-[#fbf9f5] border border-dashed border-[#d8cfc0] rounded-xs space-y-2">
-              <MessageSquare className="w-8 h-8 text-[#8c857d] mx-auto opacity-50" />
-              <h4 className="font-serif-luxury text-base font-semibold text-[#181614]">
-                No reviews found for this rating
-              </h4>
-              <p className="text-xs text-[#736a61]">
-                Try selecting "All" to view all reviews for this handcrafted piece.
-              </p>
+              )}
             </div>
-          )}
-        </div>
+          </>
+        )}
 
       </section>
 

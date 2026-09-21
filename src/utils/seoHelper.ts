@@ -181,15 +181,16 @@ export const buildProductJsonLd = (product: Product, canonicalUrl: string): Reco
     jsonLdData['material'] = product.material;
   }
 
-  // AggregateRating from reviews if present
-  const hasReviewsCount = Boolean(product.reviewsCount && product.reviewsCount > 0);
-  const hasReviewsArray = Boolean(product.reviews && product.reviews.length > 0);
-  if (product.rating && (hasReviewsCount || hasReviewsArray)) {
-    const revCount = product.reviews?.length || product.reviewsCount || 1;
+  // AggregateRating only from genuine reviews if present
+  const genuineReviewsCount = (Array.isArray(product.reviews) && product.reviews.length > 0)
+    ? product.reviews.length
+    : (product.reviewsCount || 0);
+
+  if (product.rating && product.rating > 0 && genuineReviewsCount > 0) {
     jsonLdData['aggregateRating'] = {
       '@type': 'AggregateRating',
       'ratingValue': Number(product.rating).toFixed(1),
-      'reviewCount': String(revCount),
+      'reviewCount': String(genuineReviewsCount),
       'bestRating': '5',
       'worstRating': '1'
     };

@@ -2164,7 +2164,7 @@ export const AdminOverviewScreen: React.FC = () => {
                     onChange={e => setTaxRate(e.target.value)}
                     className="w-full bg-[#fbf9f5] border border-[#ded5c7] px-3.5 py-2 text-xs text-[#181614] rounded-xs focus:outline-none focus:border-[#8c562e]"
                   />
-                  <span className="text-[11px] text-[#78716c] mt-1 block">Standard luxury handcrafted leather goods GST rate is 18%.</span>
+                  <span className="text-[11px] text-[#78716c] mt-1 block">Standard luxury handcrafted leather goods GST rate is 18% (all product prices are tax-inclusive).</span>
                 </div>
 
                 <div>

@@ -179,7 +179,7 @@ export const CartDrawer: React.FC = () => {
                 </div>
                 <div className="flex justify-between text-base font-serif-luxury font-bold text-[#181614] pt-2 border-t border-[#e2d8c9]">
                   <span>Estimated Total (Incl. GST)</span>
-                  <span>{formatINR(cartTotal + Math.round(cartTotal * 0.18))}</span>
+                  <span>{formatINR(cartTotal)}</span>
                 </div>
               </div>
 
